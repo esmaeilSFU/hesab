@@ -2,7 +2,7 @@
 
 > The Google Sheet setup below is **optional**. Without it, everything is stored on the phone.
 
-A minimal, iOS-style web app for the **Smart_Finance_System** Google Sheet. Install it on an iPhone from Safari (Share → Add to Home Screen) and it opens full-screen like a native app, works offline, and syncs with the sheet.
+A minimal, iOS-style weekly budget web app that can sync with your own Google Sheet. Install it on an iPhone from Safari (Share → Add to Home Screen) and it opens full-screen like a native app, works offline, and syncs with the sheet.
 
 **Week:** remaining budget ring, daily allowance, spending pace, categories with carry-over, latest entries.
 **Activity:** search, filters (Spending / Bills / Income), tap any entry to edit or delete it.
@@ -16,7 +16,7 @@ The math matches the sheet exactly: the same week numbers, 4-week blocks, oversp
 
 ## 1. Backend (Apps Script)
 
-1. Open the sheet → **Extensions → Apps Script**. Replace the contents of `Code.gs` with `Code.gs`, then save.
+1. Open the sheet → **Extensions → Apps Script**. Replace the contents of `Code.gs` with `backend/Code.gs`, then save.
 2. Pick `setupToken` in the function menu → **Run**, then approve the permissions. Copy the token from the execution log.
 3. **Deploy → New deployment →** type **Web app**. Set *Execute as*: **Me** and *Who has access*: **Anyone**. Copy the URL that ends in `/exec`.
 

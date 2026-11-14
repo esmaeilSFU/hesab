@@ -1,5 +1,5 @@
 /**
- * Hesab API — Google Apps Script backend for the Smart_Finance_System sheet.
+ * Hesab API — Google Apps Script backend for a Hesab budget sheet.
  *
  * Install:
  *   1. Open the spreadsheet → Extensions → Apps Script. Paste this file as Code.gs.

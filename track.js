@@ -7,7 +7,7 @@ export const FORM = {
   action: 'https://docs.google.com/forms/d/e/1FAIpQLSf9YtrtQdne0svIRicVJU20-X5KH8RE9z4WlZGASu2FMuUfTQ/formResponse',
   fields: { event: 'entry.1590593901', device: 'entry.616312612', platform: 'entry.1873268121', mode: 'entry.355557302', version: 'entry.1460387134', tz: 'entry.1433201628', email: 'entry.2046709935' },
 };
-export const VERSION = '1.4.2';
+export const VERSION = '1.4.3';
 
 const K = { device: 'hesab.t.device', day: 'hesab.t.day', installed: 'hesab.t.installed', optout: 'hesab.t.optout', email: 'hesab.t.email' };
 const get = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
