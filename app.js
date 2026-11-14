@@ -567,12 +567,13 @@ function insightsWeek() {
   const e = state.engine;
   const cur = e.currentWeek;
   const bars = e.weekBars(cur, 16);
-  const done = bars.filter((b) => b.week < cur);
+  const done = bars.filter((b) => b.week < cur && b.active);
   const avg = done.length ? done.reduce((s, b) => s + b.spent, 0) / done.length : 0;
   const under = done.filter((b) => b.spent <= b.target).length;
   const sel = bars.find((b) => b.week === state.week) || bars[bars.length - 1];
   const savings = e.savings(state.week).filter((s) => s.amount > 0).sort((a, b) => b.amount - a.amount);
   const totalSavings = savings.reduce((s, x) => s + x.amount, 0);
+  const tracked = e.trackedWeeks(state.week);
   return `
   <section class="card">
     <div class="card-h"><h2>Weekly spending</h2><span class="muted">Week ${sel.week} · ${money(sel.spent, { cents: false })}</span></div>
@@ -591,9 +592,9 @@ function insightsWeek() {
   </section>
 
   <section class="card">
-    <div class="card-h"><h2>Saved so far</h2><span class="muted">through week ${state.week}</span></div>
+    <div class="card-h"><h2>Saved so far</h2><span class="muted">${tracked} tracked week${tracked === 1 ? '' : 's'}</span></div>
     <p class="kpi good">${money(totalSavings, { cents: false })}</p>
-    <p class="hint">Money left unspent in each category, week by week. Overspending carries into the next week instead.</p>
+    <p class="hint">Money left unspent in each category, counted only for weeks where you logged something. Overspending carries into the next week instead.</p>
     ${savings.length ? chart.hbars(savings.map((s) => ({ category: s.category.name, amount: s.amount }))) : ''}
   </section>`;
 }

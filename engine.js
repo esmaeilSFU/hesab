@@ -4,7 +4,7 @@
 //   block     = ceil(week / weeksPerBlock)                      (Ledger_Calc!K)
 //   remaining = week 1: target − spent
 //               later:  target + min(0, last week's remaining) − spent   (Weekly_Control!E)
-//   savings   = sum of positive weekly remainders up to a week  (Weekly_Control!I)
+//   savings   = sum of positive weekly remainders up to a week, counting only weeks with entries
 
 export const WEEKS = 52;
 
@@ -46,11 +46,16 @@ export class Engine {
 
     this.spent = {};
     this.remaining = {};
+    // A week counts as "tracked" once it has at least one entry of any kind. Weeks with nothing logged
+    // (e.g. months when the budget wasn't used) are left out of savings and averages.
+    this.active = new Array(WEEKS).fill(false);
     for (const c of this.variable) this.spent[c.name] = new Array(WEEKS).fill(0);
     for (const t of this.transactions) {
       if (!t.date || yearOf(t.date) !== this.year) continue;
       const w = weekOf(t.date);
-      if (w < 1 || w > WEEKS || !this.spent[t.category]) continue;
+      if (w < 1 || w > WEEKS) continue;
+      this.active[w - 1] = true;
+      if (!this.spent[t.category]) continue;
       this.spent[t.category][w - 1] += t.amount;
     }
     for (const c of this.variable) {
@@ -101,9 +106,11 @@ export class Engine {
     const upto = Math.min(WEEKS, Math.max(0, throughWeek));
     return this.variable.map((c) => ({
       category: c,
-      amount: this.remaining[c.name].slice(0, upto).reduce((s, v) => s + Math.max(0, v), 0),
+      amount: this.remaining[c.name].slice(0, upto).reduce((s, v, i) => s + (this.active[i] ? Math.max(0, v) : 0), 0),
     }));
   }
+  /** Number of tracked weeks up to and including a week. */
+  trackedWeeks(throughWeek) { return this.active.slice(0, Math.max(0, throughWeek)).filter(Boolean).length; }
 
   // ---- daily ----
   dailyVariable() {
@@ -148,7 +155,7 @@ export class Engine {
     const out = [];
     for (let w = start; w <= endWeek; w++) {
       const spent = this.variable.reduce((s, c) => s + this.spent[c.name][w - 1], 0);
-      out.push({ week: w, spent, target: this.weeklyTargetTotal });
+      out.push({ week: w, spent, target: this.weeklyTargetTotal, active: this.active[w - 1] });
     }
     return out;
   }
