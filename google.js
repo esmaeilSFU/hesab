@@ -118,6 +118,31 @@ export async function pickSheet() {
   });
 }
 
+/** Google's Picker runs in a cross-site iframe that needs Google cookies; iPhone/iPad Safari blocks them. */
+export const pickerWorks = () => !(/iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+
+/** Spreadsheets this app can already open (created by Hesab, or chosen once in the Picker on any device). */
+export async function listAppSheets() {
+  const t = token();
+  if (!t) throw new ApiError('auth', 'Sign in with Google first.');
+  const qs = new URLSearchParams({
+    q: "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
+    fields: 'files(id,name,modifiedTime)', orderBy: 'modifiedTime desc', pageSize: '25',
+  });
+  let res;
+  try { res = await fetch('https://www.googleapis.com/drive/v3/files?' + qs, { headers: { Authorization: 'Bearer ' + t } }); }
+  catch { throw new ApiError('network', navigator.onLine ? 'Could not reach Google.' : 'You are offline.'); }
+  if (res.status === 401) { ls.set(K.exp, String(Date.now())); throw new ApiError('auth', 'Your Google sign-in expired.'); }
+  if (!res.ok) throw new ApiError('google', `Google returned an error (${res.status}).`);
+  return ((await res.json()).files || []).map((f) => ({ id: f.id, name: f.name, modified: f.modifiedTime }));
+}
+
+/** Accepts a full Google Sheets link or a bare spreadsheet id. */
+export function sheetIdFromLink(s) {
+  const m = String(s || '').trim().match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]{20,})/) || String(s || '').trim().match(/^([a-zA-Z0-9_-]{30,})$/);
+  return m ? m[1] : null;
+}
+
 // ───────────── Sheets API
 
 const BASE = 'https://sheets.googleapis.com/v4/spreadsheets/';

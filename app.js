@@ -255,36 +255,86 @@ function deleteCategory(name, moveTo = null) {
 /** Called after the user is signed in: pick an existing sheet, or create a new one. */
 async function googleConnect(how) {
   if (!g.hasToken()) { g.signIn({ after: how }); return; }
+  if (how === 'pick') { existingSheetChooser(); return; }
   try {
-    let sheet;
-    if (how === 'create') {
-      const local = isLocal() && state.snapshot?.transactions.length ? state.snapshot : null;
-      const starter = local ? structuredClone(local) : starterSnapshot();
-      toast('Creating your Hesab sheet…');
-      sheet = await g.createSheet(starter);
-      if (local && confirm(`Copy the ${local.transactions.length} entries on this phone into your new Google Sheet?`)) {
-        const client = new g.SheetsClient(sheet);
-        g.setChosenSheet(sheet);
-        for (const t of [...local.transactions].sort((a, b) => (a.date < b.date ? -1 : 1))) {
-          await client.add({ amount: t.amount, category: t.category, date: t.date, note: t.note });
-        }
+    const local = isLocal() && state.snapshot?.transactions.length ? state.snapshot : null;
+    const starter = local ? structuredClone(local) : starterSnapshot();
+    toast('Creating your Hesab sheet…');
+    const sheet = await g.createSheet(starter);
+    if (local && confirm(`Copy the ${local.transactions.length} entries on this phone into your new Google Sheet?`)) {
+      const client = new g.SheetsClient(sheet);
+      g.setChosenSheet(sheet);
+      for (const t of [...local.transactions].sort((a, b) => (a.date < b.date ? -1 : 1))) {
+        await client.add({ amount: t.amount, category: t.category, date: t.date, note: t.note });
       }
-    } else {
-      sheet = await g.pickSheet();
-      if (!sheet) return;
     }
+    await connectTo(sheet);
+  } catch (e) {
+    toast(e.message, 'bad');
+  }
+}
+
+/** Opens a sheet Hesab has access to and switches the app to it. */
+async function connectTo(sheet, { fromLink = false } = {}) {
+  try {
+    toast('Opening your sheet…');
+    const snap = await new g.SheetsClient(sheet).bootstrap();
     g.setChosenSheet(sheet);
     sheetsClient = null;
-    const snap = await new g.SheetsClient(sheet).bootstrap();
     queue.save([]);
     useMode('google', snap);
     state.synced = new Date().toISOString(); store.set(LS.synced, state.synced);
     closeSheet(); render();
     toast(`Connected to “${snap.sheet.title}” · ${snap.transactions.length} entries`);
+    return true;
   } catch (e) {
-    toast(e.message, 'bad');
+    if (e.code === 'access' && fromLink) {
+      toast(g.pickerWorks()
+        ? 'Hesab doesn\'t have access to that sheet yet. Use “Browse Google Drive” to choose it once.'
+        : 'Hesab doesn\'t have access to that sheet yet. Choose it once on a computer (see below), then it shows up here.', 'bad');
+    } else toast(e.message, 'bad');
     if (e.code === 'format') googleSheetChooser();
+    return false;
   }
+}
+
+/** Existing sheet: sheets Hesab can already open, a pasted link, or Google's Drive picker where it works. */
+function existingSheetChooser() {
+  const canBrowse = g.pickerWorks();
+  openSheet(`
+    <div class="sheet-h"><button class="txt-btn" id="gBack">Back</button><b>Your sheet</b><button class="txt-btn" data-close>Cancel</button></div>
+    <div class="sheet-scroll">
+      <h3 class="grp">Sheets Hesab can open</h3>
+      <div class="card src-list" id="gList"><p class="empty">Looking in your Drive…</p></div>
+      <h3 class="grp">Paste a sheet link</h3>
+      <div class="share-row"><input class="share-url" id="gLink" type="url" inputmode="url" placeholder="https://docs.google.com/spreadsheets/d/…" aria-label="Google Sheet link"><button class="ghost" id="gOpen">Open</button></div>
+      ${canBrowse
+        ? '<button class="ghost" id="gBrowse">Browse Google Drive</button>'
+        : `<p class="hint">Don’t see your sheet? On a computer, open <b>${esc(location.host + location.pathname)}</b>, sign in with the same Google account and choose it under <b>Use a sheet I already have → Browse Google Drive</b>. It will then appear in this list on your phone. (iPhone Safari blocks Google’s file browser.)</p>`}
+    </div>`, {
+    cls: 'tall',
+    async onMount(wrap) {
+      $('#gBack', wrap).addEventListener('click', () => googleSheetChooser());
+      $('#gOpen', wrap).addEventListener('click', () => {
+        const id = g.sheetIdFromLink($('#gLink', wrap).value);
+        if (!id) { toast('That doesn’t look like a Google Sheets link.', 'bad'); return; }
+        connectTo({ id, name: 'Google Sheet' }, { fromLink: true });
+      });
+      $('#gBrowse', wrap)?.addEventListener('click', async () => {
+        try { const sheet = await g.pickSheet(); if (sheet) connectTo(sheet); } catch (e) { toast(e.message, 'bad'); }
+      });
+      const list = $('#gList', wrap);
+      try {
+        const files = await g.listAppSheets();
+        list.innerHTML = files.length
+          ? files.map((f) => `<button class="src" data-id="${esc(f.id)}" data-name="${esc(f.name)}"><span class="src-ic">${icon('list', 20)}</span><span class="src-t"><b>${esc(f.name)}</b><small>Edited ${esc(shortDate(f.modified.slice(0, 10)))}</small></span>${icon('right', 16)}</button>`).join('')
+          : '<p class="empty">No sheets yet. Create one, paste a link, or choose one in Google Drive.</p>';
+        list.querySelectorAll('.src').forEach((b) => b.addEventListener('click', () => connectTo({ id: b.dataset.id, name: b.dataset.name })));
+      } catch (e) {
+        list.innerHTML = `<p class="empty">${esc(e.message)}</p>`;
+      }
+    },
+  });
 }
 
 function googleSheetChooser() {
