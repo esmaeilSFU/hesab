@@ -34,6 +34,7 @@ const P = {
   sync: '<path d="M20 12a8 8 0 0 1-14 5.3M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v4h-4M6 21v-4h4"/>',
   calendar: '<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M8 3v4M16 3v4"/>',
   note: '<path d="M5 4h10l4 4v12H5z"/><path d="M9 12h6M9 16h4"/>',
+  alert: '<path d="M12 4 3 20h18z"/><path d="M12 10v4M12 17h.01"/>',
 };
 
 export function icon(name, size = 22, stroke = 2) {

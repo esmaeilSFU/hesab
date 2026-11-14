@@ -416,7 +416,7 @@ function weekView() {
       <div class="ring-c">${available > 0 ? `<b>${Math.round(Math.min(progress, 9.99) * 100)}%</b><span>used</span>` : `<b>—</b><span>no room</span>`}</div>
     </div>
     <div class="hero-txt">
-      <span class="pill ${tone}">${statusText}</span>
+      <span class="pill ${tone}">${icon(tone === 'good' ? 'check' : 'alert', 12, 2.6)}${statusText}</span>
       <span class="lbl">${sum.remaining < 0 ? 'Over by' : 'Left to spend'}</span>
       <span class="big">${money(Math.abs(sum.remaining), { cents: false })}</span>
       <span class="sub">${money(sum.spent, { cents: false })} spent of ${money(Math.max(0, available), { cents: false })}</span>
@@ -449,7 +449,7 @@ function catLine(l) {
     ${catIcon(l.category.name, 36)}
     <div class="cl-main">
       <div class="cl-top"><span class="cl-n">${esc(l.category.name)}</span>
-        <span class="cl-r ${l.remaining < 0 ? 'neg' : ''}">${l.remaining < 0 ? money(l.remaining, { cents: false }) : money(l.remaining, { cents: false }) + ' left'}</span></div>
+        <span class="cl-r ${l.remaining < 0 ? 'neg' : ''}">${l.remaining < 0 ? money(-l.remaining, { cents: false }) + ' over' : money(l.remaining, { cents: false }) + ' left'}</span></div>
       <div class="bar"><i style="width:${(ratio * 100).toFixed(1)}%;background:${tone}"></i></div>
       <div class="cl-sub">${money(l.spent, { cents: false })} of ${money(l.target, { cents: false })}${l.carried < -0.5 ? ` <em>· ${money(l.carried, { cents: false })} carried</em>` : ''}</div>
     </div>
@@ -593,7 +593,7 @@ function insightsYear() {
     <div class="tile"><span>Saved</span><b class="${rate < 0 ? 'neg' : 'pos'}">${Math.round(rate * 100)}%</b></div>
   </div>
   <section class="card">
-    <div class="card-h"><h2>Cash flow</h2><span class="legend"><i style="background:var(--income)"></i>In <i style="background:var(--accent)"></i>Spending <i style="background:var(--fixed)"></i>Bills</span></div>
+    <div class="card-h"><h2>Cash flow</h2><span class="legend"><i style="background:var(--income)"></i>In <i style="background:var(--spend)"></i>Spending <i style="background:var(--fixed)"></i>Bills</span></div>
     ${chart.monthBars(months)}
   </section>
   <section class="card list">
@@ -1020,7 +1020,7 @@ function startFresh() {
 
 function welcomeView() {
   return `<section class="welcome">
-    <div class="w-logo">${chart.ring(0.72, 96, 11)}</div>
+    <div class="w-logo"><img src="hesab-icon.svg" alt="Hesab logo" width="88" height="88"></div>
     <h1>Hesab</h1>
     <p class="w-lead">A calm weekly budget. See what's left, spend with confidence, and watch your savings grow.</p>
     <ul class="w-points">

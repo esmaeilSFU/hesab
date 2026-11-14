@@ -8,7 +8,7 @@ export function ring(progress, size = 132, width = 13) {
   const r = (size - width) / 2, c = 2 * Math.PI * r;
   const p = Math.max(0, Math.min(progress, 1));
   const over = progress > 1;
-  const tone = over ? 'var(--bad)' : progress > 0.85 ? 'var(--warn)' : 'var(--accent)';
+  const tone = over ? 'var(--bad)' : progress > 0.85 ? 'var(--warn)' : 'var(--spend)';
   const extra = over ? Math.min(progress - 1, 1) : 0;
   const r2 = r - width * 1.15, c2 = 2 * Math.PI * r2;
   return `<svg class="ring" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" aria-hidden="true">
@@ -35,14 +35,11 @@ export function paceChart(points, { w = 340, h = 150 } = {}) {
   const ideal = points.map((p, i) => `${i ? 'L' : 'M'}${f(x(i))},${f(y(p.ideal))}`).join('');
   const last = past[past.length - 1];
   const overPace = last && last.cumulative > last.ideal;
-  const tone = overPace ? 'var(--bad)' : 'var(--accent)';
+  const tone = overPace ? 'var(--bad)' : 'var(--spend)';
   return `<svg class="chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-label="Spending pace this week">
-    <defs><linearGradient id="paceFill" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="${tone}" stop-opacity=".28"/><stop offset="1" stop-color="${tone}" stop-opacity="0"/>
-    </linearGradient></defs>
     <line x1="${pad.l}" x2="${w - pad.r}" y1="${f(y(0))}" y2="${f(y(0))}" class="axis"/>
     <path d="${ideal}" class="ideal"/>
-    ${area ? `<path d="${area}" fill="url(#paceFill)"/>` : ''}
+    ${area ? `<path d="${area}" fill="${tone}" fill-opacity=".09"/>` : ''}
     ${line ? `<path d="${line}" fill="none" stroke="${tone}" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" class="draw"/>` : ''}
     ${last ? `<circle cx="${f(x(past.length - 1))}" cy="${f(y(last.cumulative))}" r="4.5" fill="var(--card)" stroke="${tone}" stroke-width="2.6"/>` : ''}
     ${points.map((p, i) => `<text x="${f(x(i))}" y="${h - 5}" class="tick ${p.day === todayISO() ? 'strong' : ''}" text-anchor="${i === 0 ? 'start' : i === 6 ? 'end' : 'middle'}">${weekdayNarrow(p.day)}</text>`).join('')}
@@ -63,7 +60,7 @@ export function weekBars(bars, selected, { w = 340, h = 170 } = {}) {
       const cx = pad.l + slot * i + slot / 2;
       const top = y(b.spent), hh = Math.max(2, y(0) - top);
       const cls = b.week === selected ? 'sel' : '';
-      const tone = b.spent > b.target ? 'var(--bad)' : 'var(--accent)';
+      const tone = b.spent > b.target ? 'var(--bad)' : 'var(--spend)';
       return `<g class="wbar ${cls}" data-week="${b.week}">
         <rect x="${f(cx - slot / 2)}" y="${pad.t}" width="${f(slot)}" height="${ih}" fill="transparent"/>
         <rect x="${f(cx - bw / 2)}" y="${f(y(0) - hh)}" width="${f(bw)}" height="${f(hh)}" rx="${f(Math.min(6, bw / 2))}" fill="${tone}" opacity="${b.week === selected ? 1 : 0.55}"/>
@@ -141,7 +138,7 @@ export function monthBars(months, { w = 340, h = 180 } = {}) {
       return `<g>
         <rect x="${f(x - bw - 1)}" y="${f(y(m.income))}" width="${f(bw)}" height="${f(Math.max(0, inc))}" rx="3" fill="var(--income)"/>
         <rect x="${f(x + 1)}" y="${f(y(m.fixed))}" width="${f(bw)}" height="${f(Math.max(0, fx))}" rx="3" fill="var(--fixed)"/>
-        <rect x="${f(x + 1)}" y="${f(y(m.fixed) - va)}" width="${f(bw)}" height="${f(Math.max(0, va))}" rx="3" fill="var(--accent)"/>
+        <rect x="${f(x + 1)}" y="${f(y(m.fixed) - va)}" width="${f(bw)}" height="${f(Math.max(0, va))}" rx="3" fill="var(--spend)"/>
         <text x="${f(x)}" y="${h - 5}" class="tick ${m.month === thisMonth ? 'strong' : ''}" text-anchor="middle">${monthShort(m.month).slice(0, 1)}</text>
       </g>`;
     }).join('')}

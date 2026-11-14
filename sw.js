@@ -1,9 +1,12 @@
 // Offline shell: the app's own files are cached; calls to Google are never intercepted.
-const VERSION = 'hesab-v9';
+const VERSION = 'hesab-v10';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'app.css',
   'app.js', 'engine.js', 'api.js', 'format.js', 'charts.js', 'icons.js', 'demo.js', 'data.js', 'install.js', 'google.js', 'track.js', 'qrcode.js', 'privacy.html',
   'icon.svg',
+  'hesab-icon.svg',
+  'favicon.svg',
+  'apple-touch-icon.png',
 ];
 
 self.addEventListener('install', (e) => {

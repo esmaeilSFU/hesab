@@ -45,24 +45,24 @@ export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&a
 // ---- category look ----
 // Exact names first, then keywords, so custom categories still get a fitting icon.
 const STYLE = {
-  'Rent': ['house', '#6E6AF0'], 'Car Payment': ['car', '#5B8DEF'], 'Car Insurance': ['shield', '#4FA3C7'], 'Insurance': ['shield', '#4FA3C7'],
-  'Phone': ['phone', '#7C8AA5'], 'Internet': ['wifi', '#5AA9E6'], 'Electricity': ['bolt', '#E0A93B'], 'Utilities': ['bolt', '#E0A93B'],
-  'Memberships': ['star', '#B08AE0'], 'Subscriptions': ['star', '#B08AE0'], 'Grocery': ['cart', '#3FB37F'], 'Gas': ['fuel', '#F08A4B'],
-  'Food & Cafe': ['cup', '#C98552'], 'Personal Stuff': ['bag', '#E26D9C'], 'Personal': ['bag', '#E26D9C'], 'Entertainment': ['sparkle', '#9B6CE8'],
-  'Gifts': ['gift', '#EF5B6B'], 'Transportation': ['tram', '#3E9FB8'], 'Home & Household': ['sofa', '#8C9F5A'],
-  'ETC': ['dots', '#8E8E93'], 'Other': ['dots', '#8E8E93'],
+  'Rent': ['house', '#6A5A9E'], 'Car Payment': ['car', '#3F6A96'], 'Car Insurance': ['shield', '#3E7884'], 'Insurance': ['shield', '#3E7884'],
+  'Phone': ['phone', '#6A6578'], 'Internet': ['wifi', '#3A7699'], 'Electricity': ['bolt', '#9A6A14'], 'Utilities': ['bolt', '#9A6A14'],
+  'Memberships': ['star', '#86578F'], 'Subscriptions': ['star', '#86578F'], 'Grocery': ['cart', '#3F7A4E'], 'Gas': ['fuel', '#B05A2C'],
+  'Food & Cafe': ['cup', '#8E5E36'], 'Personal Stuff': ['bag', '#A4486D'], 'Personal': ['bag', '#A4486D'], 'Entertainment': ['sparkle', '#6B56A3'],
+  'Gifts': ['gift', '#A9464E'], 'Transportation': ['tram', '#2E7A7E'], 'Home & Household': ['sofa', '#66773A'],
+  'ETC': ['dots', '#7A736C'], 'Other': ['dots', '#7A736C'],
 };
 const KEYWORDS = [
-  [/income|salary|paycheck|wage|bonus|refund/i, 'income', '#2F9BDB'], [/rent|mortgage|house/i, 'house', '#6E6AF0'],
-  [/car|auto|vehicle/i, 'car', '#5B8DEF'], [/insur/i, 'shield', '#4FA3C7'], [/phone|mobile/i, 'phone', '#7C8AA5'],
-  [/internet|wifi/i, 'wifi', '#5AA9E6'], [/electric|hydro|utilit|power|water/i, 'bolt', '#E0A93B'],
-  [/subscri|member|netflix|spotify|gym/i, 'star', '#B08AE0'], [/grocer|market|supermarket/i, 'cart', '#3FB37F'],
-  [/gas|fuel|petrol/i, 'fuel', '#F08A4B'], [/food|cafe|coffee|restaurant|dining|eat/i, 'cup', '#C98552'],
-  [/cloth|shop|personal|beauty|care/i, 'bag', '#E26D9C'], [/fun|entertain|movie|game|travel|trip/i, 'sparkle', '#9B6CE8'],
-  [/gift|donat|charity/i, 'gift', '#EF5B6B'], [/transport|transit|bus|train|taxi|uber|parking/i, 'tram', '#3E9FB8'],
-  [/home|household|furnit|kitchen/i, 'sofa', '#8C9F5A'],
+  [/income|salary|paycheck|wage|bonus|refund/i, 'income', '#28745B'], [/rent|mortgage|house/i, 'house', '#6A5A9E'],
+  [/car|auto|vehicle/i, 'car', '#3F6A96'], [/insur/i, 'shield', '#3E7884'], [/phone|mobile/i, 'phone', '#6A6578'],
+  [/internet|wifi/i, 'wifi', '#3A7699'], [/electric|hydro|utilit|power|water/i, 'bolt', '#9A6A14'],
+  [/subscri|member|netflix|spotify|gym/i, 'star', '#86578F'], [/grocer|market|supermarket/i, 'cart', '#3F7A4E'],
+  [/gas|fuel|petrol/i, 'fuel', '#B05A2C'], [/food|cafe|coffee|restaurant|dining|eat/i, 'cup', '#8E5E36'],
+  [/cloth|shop|personal|beauty|care/i, 'bag', '#A4486D'], [/fun|entertain|movie|game|travel|trip/i, 'sparkle', '#6B56A3'],
+  [/gift|donat|charity/i, 'gift', '#A9464E'], [/transport|transit|bus|train|taxi|uber|parking/i, 'tram', '#2E7A7E'],
+  [/home|household|furnit|kitchen/i, 'sofa', '#66773A'],
 ];
-const PALETTE = ['#6E6AF0', '#3FB37F', '#F08A4B', '#E26D9C', '#3E9FB8', '#9B6CE8', '#C98552', '#5B8DEF', '#8C9F5A', '#EF5B6B'];
+const PALETTE = ['#6A5A9E', '#3F7A4E', '#B05A2C', '#A4486D', '#2E7A7E', '#6B56A3', '#8E5E36', '#3F6A96', '#66773A', '#A9464E'];
 
 export function catStyle(name) {
   if (STYLE[name]) return { icon: STYLE[name][0], color: STYLE[name][1] };
