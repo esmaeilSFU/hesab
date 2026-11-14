@@ -150,7 +150,9 @@ const EPOCH = Date.UTC(1899, 11, 30);
 const serialToISO = (n) => new Date(EPOCH + Math.round(Number(n)) * 86400000).toISOString().slice(0, 10);
 const serialToMs = (n) => EPOCH + Number(n) * 86400000; // local wall time, treated as UTC
 const pad = (n) => String(n).padStart(2, '0');
-const stamp = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+// Dates are written as raw serial numbers so the sheet's own date format applies (same as Form entries).
+const dateSerial = (iso) => { const [y, m, d] = iso.split('-').map(Number); return (Date.UTC(y, m - 1, d) - EPOCH) / 86400000; };
+const nowSerial = (d = new Date()) => (Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds()) - EPOCH) / 86400000;
 const q = (s) => encodeURIComponent(s);
 
 /** Client with the same shape as the Apps Script Api: bootstrap / add / update / remove / setBudget. */
@@ -215,7 +217,7 @@ export class SheetsClient {
 
   #row(entry, cats, ts) {
     const c = cats.find((x) => x.name === entry.category) || {};
-    return [ts, entry.date, entry.amount, c.type || 'Expense', c.expenseType || '', entry.category, entry.note || ''];
+    return [ts, dateSerial(entry.date), entry.amount, c.type || 'Expense', c.expenseType || '', entry.category, entry.note || ''];
   }
 
   async #categories() {
@@ -225,9 +227,8 @@ export class SheetsClient {
 
   async add(entry) {
     await this.#meta();
-    const ts = stamp();
-    const values = [this.#row(entry, await this.#categories(), ts)];
-    const r = await call(`${this.id}/values/${q('Ledger!A:G')}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS&includeValuesInResponse=true&responseValueRenderOption=UNFORMATTED_VALUE`, { method: 'POST', body: { values } });
+    const values = [this.#row(entry, await this.#categories(), nowSerial())];
+    const r = await call(`${this.id}/values/${q('Ledger!A:G')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS&includeValuesInResponse=true&responseValueRenderOption=UNFORMATTED_VALUE`, { method: 'POST', body: { values } });
     const range = r.updates?.updatedRange || '';
     const row = Number((range.match(/!A(\d+)/) || [])[1]) || -1;
     const tsVal = r.updates?.updatedData?.values?.[0]?.[0];
@@ -250,7 +251,7 @@ export class SheetsClient {
     await this.#meta();
     const row = await this.#resolveRow(tx);
     const c = this.#row(entry, await this.#categories(), null);
-    await call(`${this.id}/values/${q(`Ledger!B${row}:G${row}`)}?valueInputOption=USER_ENTERED`, { method: 'PUT', body: { values: [c.slice(1)] } });
+    await call(`${this.id}/values/${q(`Ledger!B${row}:G${row}`)}?valueInputOption=RAW`, { method: 'PUT', body: { values: [c.slice(1)] } });
     return { ...tx, row, date: entry.date, amount: entry.amount, type: c[3], expenseType: c[4], category: entry.category, note: entry.note || '' };
   }
 
