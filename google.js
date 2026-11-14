@@ -197,7 +197,7 @@ export class SheetsClient {
 
   async bootstrap() {
     const meta = await this.#meta();
-    const ranges = ['Ledger!A2:G', 'Categories!A2:C', 'Budget!A2:B'];
+    const ranges = ['Ledger!A2:G', 'Categories!A2:C', 'Budget!A2:C'];
     const hasYear = 'Weekly_Control' in meta.tabs, hasBlock = '4Week_Report' in meta.tabs;
     if (hasYear) ranges.push('Weekly_Control!B1');
     if (hasBlock) ranges.push('4Week_Report!D2');
@@ -207,7 +207,7 @@ export class SheetsClient {
     const categories = v(1).map((row, i) => ({ name: String(row[0] ?? '').trim(), type: String(row[1] ?? '').trim(), expenseType: String(row[2] ?? '').trim(), order: i + 1 }))
       .filter((c) => c.name);
     const meta2 = Object.fromEntries(categories.map((c) => [c.name, c]));
-    const budget = v(2).map((row) => ({ category: String(row[0] ?? '').trim(), weeklyTarget: Number(row[1]) || 0 }))
+    const budget = v(2).map((row) => ({ category: String(row[0] ?? '').trim(), weeklyTarget: Number(row[1]) || 0, monthlyPlan: Number(row[2]) || 0 }))
       .filter((b) => b.category && b.category.toLowerCase() !== 'total');
 
     const transactions = [];
@@ -287,36 +287,54 @@ export class SheetsClient {
     return { deleted: true };
   }
 
-  async setBudget(category, weeklyTarget) {
+  /** Writes one Budget cell for a category: column B (weekly target) or C (monthly plan). */
+  async #budgetCell(category, col, value) {
     const r = await call(`${this.id}/values/${q('Budget!A1:A')}?valueRenderOption=UNFORMATTED_VALUE`);
-    const i = (r.values || []).findIndex((x) => String(x[0] ?? '').trim() === category);
+    const rows = r.values || [];
+    const i = rows.findIndex((x) => String(x[0] ?? '').trim() === category);
     if (i < 1) {
       const meta = await this.#meta();
       if (!meta.template) throw new ApiError('not_found', `"${category}" is not in the Budget tab of your sheet.`);
-      await call(`${this.id}/values/${q('Budget!A:B')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, { method: 'POST', body: { values: [[category, weeklyTarget]] } });
+      const row = rows.length + 1;
+      await call(`${this.id}/values/${q(`Budget!A${row}:C${row}`)}?valueInputOption=RAW`, { method: 'PUT', body: { values: [[category, col === 'B' ? value : '', col === 'C' ? value : '']] } });
       return;
     }
-    await call(`${this.id}/values/${q(`Budget!B${i + 1}`)}?valueInputOption=RAW`, { method: 'PUT', body: { values: [[weeklyTarget]] } });
+    await call(`${this.id}/values/${q(`Budget!${col}${i + 1}`)}?valueInputOption=RAW`, { method: 'PUT', body: { values: [[value]] } });
   }
+  setBudget(category, weeklyTarget) { return this.#budgetCell(category, 'B', weeklyTarget); }
+  setPlan(category, monthlyPlan) { return this.#budgetCell(category, 'C', monthlyPlan); }
 
   /** Only for sheets Hesab created: rewrites Categories and Budget, and renames categories in the Ledger. */
   async saveCategories(snapshot, renames = {}) {
     const meta = await this.#meta();
     if (!meta.template) throw new ApiError('format', 'Categories of this sheet are edited in the sheet itself.');
     const cats = [...snapshot.categories].sort((a, b) => a.order - b.order);
-    const budget = cats.filter((c) => c.type === 'Expense' && c.expenseType === 'Variable')
-      .map((c) => [c.name, snapshot.budget.find((b) => b.category === c.name)?.weeklyTarget || 0]);
+    const isVar = (c) => c.type === 'Expense' && c.expenseType === 'Variable';
+    const budget = cats.map((c) => {
+      const b = snapshot.budget.find((x) => x.category === c.name) || {};
+      return [c.name, isVar(c) ? b.weeklyTarget || 0 : '', !isVar(c) && b.monthlyPlan ? b.monthlyPlan : ''];
+    }).filter((r) => r[1] !== '' || r[2] !== '');
     const data = [
       { range: 'Categories!A2:C', values: cats.map((c) => [c.name, c.type, c.expenseType]) },
-      { range: 'Budget!A2:B', values: budget },
+      { range: 'Budget!A2:C', values: budget },
     ];
-    const ledger = Object.keys(renames).length
-      ? (await call(`${this.id}/values/${q('Ledger!F2:F')}`)).values || [] : [];
+    // Keep every Ledger row in step: renamed categories get the new name, and rows whose stored
+    // Type / Expense Type no longer match their category (its kind was changed) are corrected.
+    const byName = Object.fromEntries(cats.map((c) => [c.name, c]));
+    const ledger = (await call(`${this.id}/values/${q('Ledger!D2:F')}`)).values || [];
     ledger.forEach((r, i) => {
-      const to = renames[String(r[0] ?? '').trim()];
-      if (to) data.push({ range: `Ledger!F${i + 2}`, values: [[to]] });
+      const was = String(r[2] ?? '').trim();
+      const name = renames[was] || was;
+      const c = byName[name];
+      if (!was) return;
+      if (name !== was) data.push({ range: `Ledger!F${i + 2}`, values: [[name]] });
+      const stored = [String(r[0] ?? '').trim(), String(r[1] ?? '').trim()];
+      // Blank Type cells are filled by the sheet from the Categories tab, so only stored values need fixing.
+      if (c && (stored[0] || stored[1]) && (stored[0] !== c.type || stored[1] !== c.expenseType)) {
+        data.push({ range: `Ledger!D${i + 2}:E${i + 2}`, values: [[c.type, c.expenseType]] });
+      }
     });
-    await call(`${this.id}/values:batchClear`, { method: 'POST', body: { ranges: ['Categories!A2:C', 'Budget!A2:B'] } });
+    await call(`${this.id}/values:batchClear`, { method: 'POST', body: { ranges: ['Categories!A2:C', 'Budget!A2:C'] } });
     await call(`${this.id}/values:batchUpdate`, { method: 'POST', body: { valueInputOption: 'RAW', data } });
   }
 }
@@ -331,7 +349,7 @@ export async function createSheet(starter) {
     sheets: [
       { properties: { sheetId: 1, title: 'Ledger', gridProperties: { frozenRowCount: 1 } }, data: [{ rowData: [head(LEDGER_HEAD)] }] },
       { properties: { sheetId: 2, title: 'Categories', gridProperties: { frozenRowCount: 1 } }, data: [{ rowData: [head(['Category', 'Type', 'Expense Type']), ...rows(cats.map((c) => [c.name, c.type, c.expenseType]))] }] },
-      { properties: { sheetId: 3, title: 'Budget', gridProperties: { frozenRowCount: 1 } }, data: [{ rowData: [head(['Category', 'Weekly Target']), ...rows(starter.budget.map((b) => [b.category, b.weeklyTarget]))] }] },
+      { properties: { sheetId: 3, title: 'Budget', gridProperties: { frozenRowCount: 1 } }, data: [{ rowData: [head(['Category', 'Weekly Target', 'Monthly Plan']), ...rows(starter.budget.map((b) => [b.category, b.weeklyTarget || '', b.monthlyPlan || '']))] }] },
       { properties: { sheetId: 4, title: '_hesab', hidden: true }, data: [{ rowData: rows([['Created by Hesab', 'https://esmaeilsfu.github.io/hesab/'], ['Do not rename the Ledger, Categories or Budget tabs.', '']]) }] },
     ],
   };

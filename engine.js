@@ -42,6 +42,7 @@ export class Engine {
     this.categories = [...snapshot.categories].sort((a, b) => a.order - b.order);
     this.transactions = snapshot.transactions;
     this.targets = Object.fromEntries(snapshot.budget.map((b) => [b.category, Number(b.weeklyTarget) || 0]));
+    this.plans = Object.fromEntries(snapshot.budget.map((b) => [b.category, Number(b.monthlyPlan) || 0]));
     this.variable = this.categories.filter((c) => isVariable(c));
 
     this.spent = {};
@@ -167,6 +168,19 @@ export class Engine {
       if (isIncome(t)) r.income += t.amount; else if (isFixed(t)) r.fixed += t.amount; else r.variable += t.amount;
     }
     return m;
+  }
+  /** Bills and income for one calendar month ('YYYY-MM') against their monthly plan. */
+  monthVsPlan(ym) {
+    const actual = {};
+    for (const t of this.transactions) {
+      if (!t.date || t.date.slice(0, 7) !== ym || isVariable(t)) continue;
+      actual[t.category] = (actual[t.category] || 0) + t.amount;
+    }
+    const rows = this.categories.filter((c) => !isVariable(c)).map((c) => ({
+      category: c, kind: isIncome(c) ? 'income' : 'fixed', plan: this.plans[c.name] || 0, actual: actual[c.name] || 0,
+    })).filter((r) => r.plan || r.actual);
+    const sum = (k, f) => rows.filter((r) => r.kind === k).reduce((s, r) => s + r[f], 0);
+    return { rows, income: { plan: sum('income', 'plan'), actual: sum('income', 'actual') }, fixed: { plan: sum('fixed', 'plan'), actual: sum('fixed', 'actual') } };
   }
   totalsBy(filter) {
     const out = {};

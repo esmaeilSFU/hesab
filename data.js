@@ -139,7 +139,7 @@ export function fromBackup(text) {
     year: Number(todayISO().slice(0, 4)),
     weeksPerBlock: Number(d.weeksPerBlock) || 4,
     categories: d.categories.map((c, i) => ({ name: String(c.name), type: String(c.type || 'Expense'), expenseType: String(c.expenseType || ''), order: Number(c.order) || i + 1 })),
-    budget: d.budget.map((b) => ({ category: String(b.category), weeklyTarget: Math.max(0, Number(b.weeklyTarget) || 0) })),
+    budget: d.budget.map((b) => ({ category: String(b.category), weeklyTarget: Math.max(0, Number(b.weeklyTarget) || 0), monthlyPlan: Math.max(0, Number(b.monthlyPlan) || 0) })),
     transactions: d.transactions.filter((t) => t && t.date && Number(t.amount) > 0).map((t) => ({
       row: 0, id: t.id ? String(t.id) : newId(), timestamp: t.timestamp || null, date: String(t.date), amount: Number(t.amount),
       type: String(t.type || ''), expenseType: String(t.expenseType || ''), category: String(t.category || ''), note: String(t.note || ''),

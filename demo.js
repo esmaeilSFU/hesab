@@ -11,9 +11,9 @@ const NOTES = {
 };
 // [category, chance per day, min, max]
 const FREQ = [
-  ['Food & Cafe', 0.6, 5, 28], ['Grocery', 0.3, 20, 80], ['Gas', 0.1, 40, 60], ['Personal', 0.15, 10, 60],
-  ['Entertainment', 0.12, 10, 45], ['Gifts', 0.08, 15, 50], ['Transportation', 0.25, 3, 12],
-  ['Home & Household', 0.1, 10, 50], ['Other', 0.15, 5, 40],
+  ['Food & Cafe', 0.5, 4, 22], ['Grocery', 0.25, 20, 65], ['Gas', 0.08, 35, 55], ['Personal', 0.12, 8, 45],
+  ['Entertainment', 0.1, 8, 35], ['Gifts', 0.06, 12, 40], ['Transportation', 0.22, 3, 10],
+  ['Home & Household', 0.08, 10, 40], ['Other', 0.12, 5, 30],
 ];
 // Monthly bills on the 1st, and two invented paychecks a month.
 const BILLS = [['Rent', 1800], ['Car Payment', 400], ['Insurance', 150], ['Phone', 50], ['Internet', 60], ['Utilities', 70], ['Subscriptions', 25]];
@@ -45,5 +45,7 @@ export function demoSnapshot() {
     if (dayIndex(d) % 14 === 4) add(d, 2000, 'Salary', 'Paycheck');
     if (d.endsWith('-15')) add(d, 300, 'Other Income', 'Side project');
   }
-  return { ...base, transactions: tx };
+  const plans = { ...Object.fromEntries(BILLS), 'Salary': 4000, 'Other Income': 300 };
+  const budget = [...base.budget, ...Object.entries(plans).map(([category, monthlyPlan]) => ({ category, weeklyTarget: 0, monthlyPlan }))];
+  return { ...base, budget, transactions: tx };
 }

@@ -42,6 +42,9 @@ const isLocal = () => mode() === 'local';
 const isGoogle = () => mode() === 'google';
 const isRemote = () => mode() === 'sheet' || isGoogle();
 const canEditCategories = () => isLocal() || isDemo() || (isGoogle() && !!state.snapshot?.sheet?.template);
+/** Monthly plans live in Budget column C; the legacy Apps Script backend can't write them. */
+const canEditPlans = () => mode() !== 'sheet';
+const MAX_SPENDING_CATS = 30; // the sheet's report tabs hold up to 30 spending categories
 
 let sheetsClient = null;
 const api = () => {
@@ -106,6 +109,7 @@ async function runOp(client, op) {
     case 'update': { const saved = await client.update(op.tx, op.entry); return (s) => { const i = s.transactions.findIndex((t) => t.id === op.tx.id); if (i >= 0) s.transactions[i] = saved; }; }
     case 'delete': await client.remove(op.tx); return (s) => s.transactions.forEach((t) => { if (t.row > op.tx.row) t.row -= 1; });
     case 'budget': await client.setBudget(op.category, op.value); return null;
+    case 'plan': await client.setPlan(op.category, op.value); return null;
     case 'categories': await client.saveCategories(state.snapshot, op.renames || {}); return null;
     default: return null;
   }
@@ -207,8 +211,15 @@ function deleteEntry(tx) {
 
 function setTarget(category, value) {
   return mutate(
-    (s) => { const b = s.budget.find((x) => x.category === category); if (b) b.weeklyTarget = value; else s.budget.push({ category, weeklyTarget: value }); },
+    (s) => { const b = s.budget.find((x) => x.category === category); if (b) b.weeklyTarget = value; else s.budget.push({ category, weeklyTarget: value, monthlyPlan: 0 }); },
     { kind: 'budget', category, value }, null,
+  );
+}
+
+function setPlan(category, value) {
+  return mutate(
+    (s) => { const b = s.budget.find((x) => x.category === category); if (b) b.monthlyPlan = value; else s.budget.push({ category, weeklyTarget: 0, monthlyPlan: value }); },
+    { kind: 'plan', category, value }, null,
   );
 }
 
@@ -218,11 +229,13 @@ function syncCategories(renames = {}) {
   mutate(() => {}, { kind: 'categories', renames }, null);
 }
 
-function saveCategory(oldName, { name, kind, target }) {
+function saveCategory(oldName, { name, kind, target, plan }) {
   const s = state.snapshot;
   name = name.trim();
   if (!name) return 'Give the category a name.';
   if (name !== oldName && s.categories.some((c) => c.name.toLowerCase() === name.toLowerCase())) return 'A category with that name already exists.';
+  const spendingAfter = s.categories.filter((c) => c.name !== oldName && isVariable(c)).length + (kind === 'variable' ? 1 : 0);
+  if (isGoogle() && spendingAfter > MAX_SPENDING_CATS) return `Your sheet's reports hold up to ${MAX_SPENDING_CATS} spending categories.`;
   const type = kind === 'income' ? 'Income' : 'Expense';
   const expenseType = kind === 'income' ? '' : kind === 'fixed' ? 'Fixed' : 'Variable';
   let cat = s.categories.find((c) => c.name === oldName);
@@ -230,7 +243,9 @@ function saveCategory(oldName, { name, kind, target }) {
   Object.assign(cat, { name, type, expenseType });
   for (const t of s.transactions) if (oldName && t.category === oldName) Object.assign(t, { category: name, type, expenseType });
   s.budget = s.budget.filter((b) => b.category !== oldName && b.category !== name);
-  if (kind === 'variable') s.budget.push({ category: name, weeklyTarget: Math.max(0, Number(target) || 0) });
+  const weeklyTarget = kind === 'variable' ? Math.max(0, Number(target) || 0) : 0;
+  const monthlyPlan = kind !== 'variable' ? Math.max(0, Number(plan) || 0) : 0;
+  if (weeklyTarget || monthlyPlan || kind === 'variable') s.budget.push({ category: name, weeklyTarget, monthlyPlan });
   setSnapshot(s, { keepWeek: true });
   render();
   syncCategories(oldName && oldName !== name ? { [oldName]: name } : {});
@@ -398,7 +413,7 @@ function header(title, subtitle, { nav = false } = {}) {
     : pend ? `<span class="sync-pill">${pend} waiting to sync</span>` : '';
   return `<header class="hdr">
     <div class="hdr-row">
-      <span class="eyebrow">${pill || esc(synced)}</span>
+      <span class="brand"><img src="hesab-icon.svg" alt="Hesab" width="28" height="28"><span class="eyebrow">${pill || esc(synced)}</span></span>
       <div class="hdr-actions">
         ${!api() ? '' : `<button class="icon-btn" id="syncBtn" data-act="sync" aria-label="Refresh">${icon('sync', 19)}</button>`}
         <button class="icon-btn" data-act="settings" aria-label="Settings">${icon('gear', 20)}</button>
@@ -616,6 +631,7 @@ function insightsBlock() {
     <div class="tile"><span>Bills</span><b>${compact(b.fixed)}</b></div>
     <div class="tile"><span>Net</span><b class="${b.net < 0 ? 'neg' : 'pos'}">${compact(b.net)}</b></div>
   </div>
+  ${planCard(e.daysOf(w2)[6] < todayISO() ? e.daysOf(w2)[6].slice(0, 7) : todayISO().slice(0, 7))}
   <section class="card">
     <div class="card-h"><h2>Where it went</h2><span class="muted">${money(b.variableSpent, { cents: false })} of ${money(b.variableTarget, { cents: false })}</span></div>
     <div class="donut-row">
@@ -626,6 +642,48 @@ function insightsBlock() {
   <section class="card list">
     <div class="card-h"><h2>Budget vs actual</h2></div>
     ${b.lines.map((l) => catLine({ category: l.category, spent: l.spent, target: l.target, carried: 0, available: l.target, remaining: l.target - l.spent })).join('')}
+  </section>`;
+}
+
+/** Bills and income for one month against the monthly plan set in Settings. */
+function planCard(ym) {
+  const e = state.engine;
+  const m = e.monthVsPlan(ym);
+  const label = new Date(ym + '-15T12:00:00').toLocaleDateString('en-CA', { month: 'long', year: 'numeric' });
+  const hasPlan = m.rows.some((r) => r.plan > 0);
+  if (!m.rows.length || !hasPlan) {
+    return `<section class="card"><div class="card-h"><h2>Bills & income</h2><span class="muted">${esc(label)}</span></div>
+      <p class="hint">Set a monthly amount for each bill and income in Settings to see what's paid, what's still due and what came in.</p>
+      <button class="ghost" data-act="settings">${icon('gear', 18)} Set monthly amounts</button></section>`;
+  }
+  const status = (r) => {
+    if (!r.plan) return { t: 'No plan', c: 'muted', ic: '' };
+    if (r.kind === 'income') {
+      if (r.actual >= r.plan) return { t: 'Received', c: 'pos', ic: 'check' };
+      return r.actual > 0 ? { t: `${money(r.plan - r.actual, { cents: false })} to come`, c: 'muted', ic: '' } : { t: 'Expected', c: 'muted', ic: '' };
+    }
+    if (r.actual === 0) return { t: 'Due', c: 'muted', ic: '' };
+    if (r.actual > r.plan * 1.02) return { t: `${money(r.actual - r.plan, { cents: false })} over`, c: 'neg', ic: 'alert' };
+    return { t: 'Paid', c: 'pos', ic: 'check' };
+  };
+  const row = (r) => {
+    const st = status(r);
+    const pct = r.plan ? Math.min(100, (100 * r.actual) / r.plan) : 0;
+    const col = r.kind === 'income' ? 'var(--income)' : r.actual > r.plan * 1.02 && r.plan ? 'var(--bad)' : 'var(--spend)';
+    return `<div class="cl">${catIcon(r.category.name, 36)}<div class="cl-main">
+      <div class="cl-top"><span class="cl-n">${esc(r.category.name)}</span><span class="cl-r ${st.c}">${st.ic ? icon(st.ic, 13, 2.6) + ' ' : ''}${esc(st.t)}</span></div>
+      <div class="bar"><i style="width:${pct.toFixed(1)}%;background:${col}"></i></div>
+      <div class="cl-sub">${money(r.actual, { cents: false })} of ${money(r.plan, { cents: false })}</div></div></div>`;
+  };
+  const inc = m.rows.filter((r) => r.kind === 'income'), bills = m.rows.filter((r) => r.kind === 'fixed');
+  return `<section class="card list">
+    <div class="card-h"><h2>Bills & income</h2><span class="muted">${esc(label)}</span></div>
+    <div class="tiles plan-tiles">
+      <div class="tile"><span>Income</span><b class="inc">${compact(m.income.actual)}</b><small>of ${compact(m.income.plan)} planned</small></div>
+      <div class="tile"><span>Bills paid</span><b>${compact(m.fixed.actual)}</b><small>of ${compact(m.fixed.plan)} planned</small></div>
+    </div>
+    ${inc.length ? `<h3 class="sub-h">Income</h3>${inc.map(row).join('')}` : ''}
+    ${bills.length ? `<h3 class="sub-h">Bills</h3>${bills.map(row).join('')}` : ''}
   </section>`;
 }
 
@@ -836,8 +894,10 @@ function settingsSheet({ showConnect = false } = {}) {
   const catRows = cats.map((c) => {
     const k = kindOf(c);
     const budgetCell = k === 'variable'
-      ? `<span class="money-in">$<input type="number" inputmode="decimal" min="0" step="1" data-target="${esc(c.name)}" value="${e.targets[c.name] || 0}"></span>`
-      : `<span class="kind-tag">${KIND_LABEL[k]}</span>`;
+      ? `<span class="money-in">$<input type="number" inputmode="decimal" min="0" step="1" data-target="${esc(c.name)}" value="${e.targets[c.name] || 0}" aria-label="${esc(c.name)} weekly budget"></span>`
+      : canEditPlans()
+        ? `<span class="plan-in"><span class="money-in">$<input type="number" inputmode="decimal" min="0" step="1" data-plan="${esc(c.name)}" value="${e.plans[c.name] || 0}" aria-label="${esc(c.name)} monthly amount"></span><small>/mo</small></span>`
+        : `<span class="kind-tag">${KIND_LABEL[k]}</span>`;
     return `<div class="row" data-name="${esc(c.name)}">${editable ? `<span class="grip" data-grip aria-label="Drag to reorder">${icon('grip', 18)}</span>` : ''}${catIcon(c.name, 30)}
       ${editable ? `<button class="row-name" data-cat-edit="${esc(c.name)}">${esc(c.name)}</button>` : `<span>${esc(c.name)}</span>`}
       ${budgetCell}</div>`;
@@ -875,7 +935,7 @@ function settingsSheet({ showConnect = false } = {}) {
         <div class="row total"><span>Weekly spending budget</span><b id="tTotal">${money(e.weeklyTargetTotal, { cents: false })}</b></div>
       </div>
       ${editable ? `<button class="ghost" data-cat-edit="">${icon('plus', 18, 2.4)} New category</button>` : ''}
-      ${editable ? '<p class="hint">Drag ⋮⋮ to change the order. Tap a name to rename, change its type, or delete it.</p>' : ''}
+      ${editable ? '<p class="hint">Spending categories have a weekly budget; bills and income have a monthly amount. Drag ⋮⋮ to change the order. Tap a name to rename, change its type, or delete it.</p>' : ''}
       <p class="hint">${isRemote() && !editable ? 'Budget changes are written to the Budget tab of your sheet. Categories come from its Categories tab.' : isGoogle() ? 'Changes are saved to your Google Sheet.' : 'Spending categories have a weekly budget. Unspent money is saved; overspending carries into next week.'}</p>
 
       ${isDemo() ? '' : `<h3 class="grp">Backup & moving phones</h3>
@@ -908,6 +968,7 @@ function settingsSheet({ showConnect = false } = {}) {
       <p class="hint">Your email is optional and only used for occasional Hesab news. Usage stats are anonymous: never your money, entries or name.</p>
       ${local ? '<button class="txt-btn bad center" id="eraseAll">Erase all data on this device</button>' : ''}
       ${isRemote() ? '<button class="txt-btn bad center" id="disconnect">Disconnect Google Sheet</button>' : ''}
+      <div class="about"><img class="light-only" src="hesab-lockup-dark.svg" alt="Hesab"><img class="dark-only" src="hesab-lockup-light.svg" alt="Hesab"><span>Version ${esc(track.VERSION)}</span></div>
     </div>`;
 
   openSheet(html, {
@@ -965,6 +1026,11 @@ function settingsSheet({ showConnect = false } = {}) {
         await setTarget(inp.dataset.target, v);
         $('#tTotal', wrap).textContent = money(state.engine.weeklyTargetTotal, { cents: false });
       }));
+      wrap.querySelectorAll('[data-plan]').forEach((inp) => inp.addEventListener('change', async () => {
+        const v = Math.max(0, Math.round(Number(inp.value) * 100) / 100 || 0);
+        inp.value = v;
+        await setPlan(inp.dataset.plan, v);
+      }));
       wrap.querySelectorAll('[data-cat-edit]').forEach((b) => b.addEventListener('click', () => categorySheet(b.dataset.catEdit || null)));
       if (editable) enableReorder($('#catList', wrap), (names) => { reorderCategories(names); toast('Order saved'); });
 
@@ -1019,6 +1085,9 @@ function categorySheet(name) {
     <div class="card form" id="catBudget">
       <label><span>Weekly budget</span><span class="money-in">$<input id="catTarget" type="number" inputmode="decimal" min="0" value="${c ? state.engine.targets[c.name] || 0 : 0}"></span></label>
     </div>
+    <div class="card form" id="catPlan" ${canEditPlans() ? '' : 'data-off'}>
+      <label><span id="catPlanL">Monthly amount</span><span class="money-in">$<input id="catPlanV" type="number" inputmode="decimal" min="0" value="${c ? state.engine.plans[c.name] || 0 : 0}"></span></label>
+    </div>
     <p class="hint" id="catHint"></p>
     ${c && used ? `<div id="moveBox" hidden>
         <h3 class="grp">Move ${used} entr${used === 1 ? 'y' : 'ies'} to</h3>
@@ -1035,15 +1104,17 @@ function categorySheet(name) {
       const paint = () => {
         wrap.querySelectorAll('#catKind button').forEach((b) => b.classList.toggle('on', b.dataset.k === kind));
         $('#catBudget', wrap).hidden = kind !== 'variable';
+        $('#catPlan', wrap).hidden = kind === 'variable' || $('#catPlan', wrap).hasAttribute('data-off');
+        $('#catPlanL', wrap).textContent = kind === 'income' ? 'Expected per month' : 'Planned per month';
         $('#catHint', wrap).textContent = kind === 'variable' ? 'Everyday spending with a weekly budget.'
-          : kind === 'fixed' ? 'Regular bills like rent or phone. Counted in reports, not in the weekly budget.' : 'Money coming in.';
+          : kind === 'fixed' ? 'Regular bills like rent or phone. Not part of the weekly budget; Insights shows if each one is paid this month.' : 'Money coming in. Insights compares it with what you expect each month.';
         $('#catPrev', wrap).innerHTML = catIcon($('#catName', wrap).value || 'New', 64);
       };
       $('#catKind', wrap).addEventListener('click', (ev) => { const b = ev.target.closest('[data-k]'); if (b) { kind = b.dataset.k; paint(); } });
       $('#catName', wrap).addEventListener('input', paint);
       wrap.querySelector('[data-back]').addEventListener('click', () => settingsSheet());
       $('#catSave', wrap).addEventListener('click', () => {
-        const err = saveCategory(c?.name || null, { name: $('#catName', wrap).value, kind, target: $('#catTarget', wrap).value });
+        const err = saveCategory(c?.name || null, { name: $('#catName', wrap).value, kind, target: $('#catTarget', wrap).value, plan: $('#catPlanV', wrap).value });
         if (err) { toast(err, 'bad'); return; }
         settingsSheet();
       });

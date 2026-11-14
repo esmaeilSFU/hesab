@@ -1,5 +1,5 @@
 // Offline shell: the app's own files are cached; calls to Google are never intercepted.
-const VERSION = 'hesab-v13';
+const VERSION = 'hesab-v14';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'app.css',
   'app.js', 'engine.js', 'api.js', 'format.js', 'charts.js', 'icons.js', 'demo.js', 'data.js', 'install.js', 'google.js', 'track.js', 'qrcode.js', 'privacy.html',
