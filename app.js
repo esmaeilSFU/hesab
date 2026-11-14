@@ -6,15 +6,18 @@ import { money, compact, shortDate, dayTitle, weekRange, esc, catStyle } from '.
 import { icon } from './icons.js';
 import * as chart from './charts.js';
 import * as install from './install.js';
+import * as g from './google.js';
+import * as track from './track.js';
 
 // ───────────────────────────────────────────── state
 //
-// Three places the data can live:
+// Where the data can live:
 //   local  — on this device (default, free, no account)
-//   sheet  — the user's Google Sheet through the Apps Script backend
+//   google — a Google Sheet in the user's Drive, signed in with Google
+//   sheet  — a Google Sheet through the user's own Apps Script link (advanced)
 //   demo   — sample data, never saved
 
-const LS = { mode: 'hesab.mode', url: 'hesab.url', token: 'hesab.token', cache: 'hesab.snapshot', synced: 'hesab.synced' };
+const LS = { mode: 'hesab.mode', url: 'hesab.url', token: 'hesab.token', cache: 'hesab.snapshot', synced: 'hesab.synced', queue: 'hesab.queue' };
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
   set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
@@ -36,7 +39,18 @@ const state = {
 const mode = () => store.get(LS.mode);
 const isDemo = () => mode() === 'demo';
 const isLocal = () => mode() === 'local';
+const isGoogle = () => mode() === 'google';
+const isRemote = () => mode() === 'sheet' || isGoogle();
+const canEditCategories = () => isLocal() || isDemo() || (isGoogle() && !!state.snapshot?.sheet?.template);
+
+let sheetsClient = null;
 const api = () => {
+  if (isGoogle()) {
+    const sh = g.chosenSheet();
+    if (!sh) return null;
+    if (!sheetsClient || sheetsClient.id !== sh.id) sheetsClient = new g.SheetsClient(sh);
+    return sheetsClient;
+  }
   if (mode() !== 'sheet') return null;
   const url = store.get(LS.url), token = store.get(LS.token);
   return url && token ? new Api(url, token) : null;
@@ -48,7 +62,7 @@ function setSnapshot(snap, { keepWeek = false } = {}) {
   state.engine = new Engine(snap);
   if (!keepWeek || wasCurrent || !state.week) state.week = state.engine.currentWeek;
   state.block = state.engine.blockOf(state.week);
-  if (mode() === 'sheet') store.set(LS.cache, JSON.stringify(snap));
+  if (isRemote()) store.set(LS.cache, JSON.stringify(snap));
   if (isLocal() && !saveLocal(snap)) toast('Storage is full. Export a backup in Settings.', 'bad');
 }
 
@@ -56,10 +70,63 @@ const categories = () => [...(state.snapshot?.categories || [])].sort((a, b) => 
 const catByName = (n) => categories().find((c) => c.name === n);
 
 function useMode(m, snap) {
+  const prev = mode();
   store.set(LS.mode, m);
-  if (m !== 'sheet') { [LS.url, LS.token, LS.cache, LS.synced].forEach((k) => store.set(k, null)); state.synced = null; }
+  if (m !== 'sheet') [LS.url, LS.token].forEach((k) => store.set(k, null));
+  if (m !== 'google' && prev === 'google') { g.signOut(); sheetsClient = null; }
+  if (!isRemote()) { [LS.cache, LS.synced, LS.queue].forEach((k) => store.set(k, null)); state.synced = null; }
   setSnapshot(snap);
   render();
+  if (prev !== m) track.event('mode-' + m, m);
+}
+
+// ───────────────────────────────────────────── offline queue (Google mode)
+//
+// Changes made while signed out or offline are kept on the phone and sent later.
+
+const queue = {
+  all() { try { return JSON.parse(store.get(LS.queue)) || []; } catch { return []; } },
+  save(q) { store.set(LS.queue, q.length ? JSON.stringify(q) : null); },
+  push(op) {
+    let q = this.all();
+    // An edit or delete of an entry that was never sent just changes the queued add.
+    const pendingAdd = op.tx && q.find((o) => o.kind === 'add' && o.tempId === op.tx.id);
+    if (pendingAdd && op.kind === 'update') pendingAdd.entry = op.entry;
+    else if (pendingAdd && op.kind === 'delete') q = q.filter((o) => o !== pendingAdd);
+    else q.push(op);
+    this.save(q);
+  },
+};
+const pendingCount = () => queue.all().length;
+
+/** Runs one change against the server and returns a function that applies the server's answer locally. */
+async function runOp(client, op) {
+  switch (op.kind) {
+    case 'add': { const saved = await client.add(op.entry); return (s) => { const i = s.transactions.findIndex((t) => t.id === op.tempId); if (i >= 0) s.transactions[i] = saved; }; }
+    case 'update': { const saved = await client.update(op.tx, op.entry); return (s) => { const i = s.transactions.findIndex((t) => t.id === op.tx.id); if (i >= 0) s.transactions[i] = saved; }; }
+    case 'delete': await client.remove(op.tx); return (s) => s.transactions.forEach((t) => { if (t.row > op.tx.row) t.row -= 1; });
+    case 'budget': await client.setBudget(op.category, op.value); return null;
+    case 'categories': await client.saveCategories(state.snapshot, op.renames || {}); return null;
+    default: return null;
+  }
+}
+
+async function flushQueue() {
+  const client = api();
+  if (!client || !isGoogle() || !g.hasToken()) return false;
+  let q = queue.all();
+  while (q.length) {
+    try {
+      const apply = await runOp(client, q[0]);
+      if (apply) apply(state.snapshot);
+      q = q.slice(1); queue.save(q);
+    } catch (e) {
+      if (e.code === 'auth' || e.code === 'network') return false;
+      toast(`Couldn't sync a change: ${e.message}`, 'bad');
+      q = q.slice(1); queue.save(q);
+    }
+  }
+  return true;
 }
 
 // ───────────────────────────────────────────── sync
@@ -70,8 +137,10 @@ async function refresh({ quiet = false } = {}) {
   if (isDemo()) { if (!state.snapshot) setSnapshot(demoSnapshot()); render(); return; }
   const client = api();
   if (!client || state.syncing) return;
+  if (isGoogle() && !g.hasToken()) { render(); return; }
   state.syncing = true; renderChrome();
   try {
+    if (isGoogle()) await flushQueue();
     const snap = await client.bootstrap();
     setSnapshot(snap, { keepWeek: true });
     state.synced = new Date().toISOString();
@@ -84,19 +153,30 @@ async function refresh({ quiet = false } = {}) {
   }
 }
 
-async function mutate(optimistic, remote, successMsg) {
+async function mutate(optimistic, op, successMsg) {
   const before = structuredClone(state.snapshot);
   optimistic(state.snapshot);
   setSnapshot(state.snapshot, { keepWeek: true });
   render();
   const client = api();
   if (!client) { if (successMsg) toast(successMsg); return true; }
+  if (isGoogle() && (!g.hasToken() || pendingCount())) {
+    queue.push(op); render();
+    toast(g.hasToken() ? 'Saved · syncing…' : 'Saved on this phone · sign in to sync');
+    if (g.hasToken()) refresh({ quiet: true });
+    return true;
+  }
   try {
-    const result = await remote(client);
-    if (result) { result(state.snapshot); setSnapshot(state.snapshot, { keepWeek: true }); render(); }
+    const apply = await runOp(client, op);
+    if (apply) { apply(state.snapshot); setSnapshot(state.snapshot, { keepWeek: true }); render(); }
     if (successMsg) toast(successMsg);
     return true;
   } catch (e) {
+    if (isGoogle() && (e.code === 'auth' || e.code === 'network')) {
+      queue.push(op); render();
+      toast(e.code === 'auth' ? 'Saved on this phone · sign in to sync' : 'Saved on this phone · will sync when online');
+      return true;
+    }
     setSnapshot(before, { keepWeek: true });
     render();
     toast(e.message, 'bad');
@@ -106,42 +186,38 @@ async function mutate(optimistic, remote, successMsg) {
 
 function addEntry(entry) {
   const meta = catByName(entry.category) || {};
-  const tempId = api() ? 'pending-' + Date.now() : newId();
-  const temp = { row: api() ? -1 : 0, id: tempId, timestamp: new Date().toISOString(), date: entry.date, amount: entry.amount,
+  const remote = !!api();
+  const tempId = remote ? 'pending-' + Date.now() : newId();
+  const temp = { row: remote ? -1 : 0, id: tempId, timestamp: new Date().toISOString(), date: entry.date, amount: entry.amount,
     type: meta.type || 'Expense', expenseType: meta.expenseType || '', category: entry.category, note: entry.note };
-  return mutate(
-    (s) => s.transactions.push(temp),
-    async (c) => { const saved = await c.add(entry); return (s) => { const i = s.transactions.findIndex((t) => t.id === tempId); if (i >= 0) s.transactions[i] = saved; }; },
-    `Saved · ${entry.category} ${money(entry.amount)}`,
-  );
+  return mutate((s) => s.transactions.push(temp), { kind: 'add', entry, tempId }, `Saved · ${entry.category} ${money(entry.amount)}`);
 }
 
 function updateEntry(tx, entry) {
   const meta = catByName(entry.category) || {};
   return mutate(
     (s) => { const t = s.transactions.find((x) => x.id === tx.id); Object.assign(t, entry, { type: meta.type || t.type, expenseType: meta.expenseType || t.expenseType }); },
-    async (c) => { const saved = await c.update(tx, entry); return (s) => { const i = s.transactions.findIndex((t) => t.id === tx.id); if (i >= 0) s.transactions[i] = saved; }; },
-    'Updated',
+    { kind: 'update', tx: structuredClone(tx), entry }, 'Updated',
   );
 }
 
 function deleteEntry(tx) {
-  return mutate(
-    (s) => { s.transactions = s.transactions.filter((t) => t.id !== tx.id); },
-    async (c) => { await c.remove(tx); return (s) => s.transactions.forEach((t) => { if (t.row > tx.row) t.row -= 1; }); },
-    'Deleted',
-  );
+  return mutate((s) => { s.transactions = s.transactions.filter((t) => t.id !== tx.id); }, { kind: 'delete', tx: structuredClone(tx) }, 'Deleted');
 }
 
 function setTarget(category, value) {
   return mutate(
     (s) => { const b = s.budget.find((x) => x.category === category); if (b) b.weeklyTarget = value; else s.budget.push({ category, weeklyTarget: value }); },
-    async (c) => { await c.setBudget(category, value); return null; },
-    null,
+    { kind: 'budget', category, value }, null,
   );
 }
 
-// Category edits are only offered on this device; the Google Sheet keeps its own Categories tab.
+/** Category edits: on this device, or in a sheet that Hesab created (its Categories tab is rewritten). */
+function syncCategories(renames = {}) {
+  if (!isGoogle()) return;
+  mutate(() => {}, { kind: 'categories', renames }, null);
+}
+
 function saveCategory(oldName, { name, kind, target }) {
   const s = state.snapshot;
   name = name.trim();
@@ -157,6 +233,7 @@ function saveCategory(oldName, { name, kind, target }) {
   if (kind === 'variable') s.budget.push({ category: name, weeklyTarget: Math.max(0, Number(target) || 0) });
   setSnapshot(s, { keepWeek: true });
   render();
+  syncCategories(oldName && oldName !== name ? { [oldName]: name } : {});
   return null;
 }
 
@@ -170,6 +247,59 @@ function deleteCategory(name, moveTo = null) {
   s.budget = s.budget.filter((b) => b.category !== name);
   setSnapshot(s, { keepWeek: true });
   render();
+  syncCategories(target ? { [name]: target.name } : {});
+}
+
+// ───────────────────────────────────────────── Google: connect flows
+
+/** Called after the user is signed in: pick an existing sheet, or create a new one. */
+async function googleConnect(how) {
+  if (!g.hasToken()) { g.signIn({ after: how }); return; }
+  try {
+    let sheet;
+    if (how === 'create') {
+      const local = isLocal() && state.snapshot?.transactions.length ? state.snapshot : null;
+      const starter = local ? structuredClone(local) : starterSnapshot();
+      toast('Creating your Hesab sheet…');
+      sheet = await g.createSheet(starter);
+      if (local && confirm(`Copy the ${local.transactions.length} entries on this phone into your new Google Sheet?`)) {
+        const client = new g.SheetsClient(sheet);
+        g.setChosenSheet(sheet);
+        for (const t of [...local.transactions].sort((a, b) => (a.date < b.date ? -1 : 1))) {
+          await client.add({ amount: t.amount, category: t.category, date: t.date, note: t.note });
+        }
+      }
+    } else {
+      sheet = await g.pickSheet();
+      if (!sheet) return;
+    }
+    g.setChosenSheet(sheet);
+    sheetsClient = null;
+    const snap = await new g.SheetsClient(sheet).bootstrap();
+    queue.save([]);
+    useMode('google', snap);
+    state.synced = new Date().toISOString(); store.set(LS.synced, state.synced);
+    closeSheet(); render();
+    toast(`Connected to “${snap.sheet.title}” · ${snap.transactions.length} entries`);
+  } catch (e) {
+    toast(e.message, 'bad');
+    if (e.code === 'format') googleSheetChooser();
+  }
+}
+
+function googleSheetChooser() {
+  openSheet(`
+    <div class="sheet-h"><span style="width:56px"></span><b>Google Sheet</b><button class="txt-btn" data-close>Cancel</button></div>
+    <div class="install-hero"><span class="g-badge">${icon('sync', 30)}</span>
+      <p>Your budget lives in a Google Sheet in <b>your</b> Drive and syncs across your devices. Hesab can only open the sheet you choose.</p></div>
+    <button class="primary" id="gCreate">Create a new Hesab sheet</button>
+    <button class="ghost" id="gPick">Use a sheet I already have</button>
+    <p class="hint center">An existing sheet needs Ledger, Categories and Budget tabs.</p>`, {
+    onMount(wrap) {
+      $('#gCreate', wrap).addEventListener('click', () => googleConnect('create'));
+      $('#gPick', wrap).addEventListener('click', () => googleConnect('pick'));
+    },
+  });
 }
 
 // ───────────────────────────────────────────── chrome
@@ -211,9 +341,14 @@ function installSheet() {
 
 function header(title, subtitle, { nav = false } = {}) {
   const synced = isDemo() ? 'Sample data' : isLocal() ? 'On this device' : state.synced ? `Synced ${timeAgo(state.synced)}` : 'Not synced yet';
+  const pend = isGoogle() ? pendingCount() : 0;
+  const needSignIn = isGoogle() && !g.hasToken();
+  const pill = needSignIn
+    ? `<button class="sync-pill warn" data-act="gsignin">${icon('sync', 14, 2.4)}${pend ? `${pend} not synced · ` : ''}Sign in</button>`
+    : pend ? `<span class="sync-pill">${pend} waiting to sync</span>` : '';
   return `<header class="hdr">
     <div class="hdr-row">
-      <span class="eyebrow">${esc(synced)}</span>
+      <span class="eyebrow">${pill || esc(synced)}</span>
       <div class="hdr-actions">
         ${!api() ? '' : `<button class="icon-btn" id="syncBtn" data-act="sync" aria-label="Refresh">${icon('sync', 19)}</button>`}
         <button class="icon-btn" data-act="settings" aria-label="Settings">${icon('gear', 20)}</button>
@@ -600,6 +735,7 @@ function reorderCategories(names) {
   names.forEach((n, i) => { const c = s.categories.find((x) => x.name === n); if (c) c.order = i + 1; });
   setSnapshot(s, { keepWeek: true });
   render();
+  syncCategories();
 }
 
 /** Drag rows by their grip to reorder (touch and mouse). Calls onDone with the new order. */
@@ -639,8 +775,9 @@ const KIND_LABEL = { variable: 'Spending', fixed: 'Bill', income: 'Income' };
 
 function settingsSheet({ showConnect = false } = {}) {
   const e = state.engine, m = mode();
-  const editable = isLocal();
+  const editable = canEditCategories(), local = isLocal();
   const cats = categories();
+  const gSheet = g.chosenSheet();
   const sourceRow = (key, title, sub, ic) => `<button class="src ${m === key ? 'on' : ''}" data-src="${key}">
       <span class="src-ic">${icon(ic, 20)}</span><span class="src-t"><b>${title}</b><small>${sub}</small></span>
       ${m === key ? `<span class="src-ck">${icon('check', 18, 2.6)}</span>` : ''}</button>`;
@@ -661,8 +798,16 @@ function settingsSheet({ showConnect = false } = {}) {
       <h3 class="grp">Where your data lives</h3>
       <div class="card src-list">
         ${sourceRow('local', 'On this device', 'Free and private. No account needed.', 'phone')}
-        ${sourceRow('sheet', 'Google Sheet', 'Sync with your own spreadsheet.', 'sync')}
+        ${sourceRow('google', 'Google Sheet', 'Sign in with Google. Syncs across your devices.', 'sync')}
       </div>
+      ${isGoogle() ? `<div class="card form g-panel">
+        <div class="row"><span>Sheet</span><b class="ellip">${esc(state.snapshot?.sheet?.title || gSheet?.name || '—')}</b></div>
+        <div class="row"><span>Status</span><b class="${g.hasToken() ? 'pos' : 'neg'}">${g.hasToken() ? (pendingCount() ? `${pendingCount()} waiting to sync` : 'Signed in') : 'Signed out'}</b></div>
+        ${g.hasToken() ? '<button class="row act" data-g="sync">' + icon('sync', 18) + '<span>Sync now</span></button>' : '<button class="row act" data-g="signin">' + icon('sync', 18) + '<span>Sign in with Google</span></button>'}
+        <button class="row act" data-g="change">${icon('list', 18)}<span>Use a different sheet</span></button>
+        ${state.snapshot?.sheet?.id ? `<a class="row act" href="https://docs.google.com/spreadsheets/d/${esc(state.snapshot.sheet.id)}/edit" target="_blank" rel="noopener">${icon('note', 18)}<span>Open the sheet in Google Sheets</span></a>` : ''}
+      </div>` : ''}
+      ${m === 'sheet' || showConnect ? '' : '<button class="txt-btn small center" id="showScript">Advanced: connect with an Apps Script link</button>'}
       <div id="sheetForm" ${m === 'sheet' || showConnect ? '' : 'hidden'}>
         <div class="card form">
           <label><span>Script URL</span><input id="sUrl" type="url" inputmode="url" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(store.get(LS.url) || '')}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
@@ -680,16 +825,16 @@ function settingsSheet({ showConnect = false } = {}) {
       </div>
       ${editable ? `<button class="ghost" data-cat-edit="">${icon('plus', 18, 2.4)} New category</button>` : ''}
       ${editable ? '<p class="hint">Drag ⋮⋮ to change the order. Tap a name to rename, change its type, or delete it.</p>' : ''}
-      <p class="hint">${m === 'sheet' ? 'Budget changes are written to the Budget tab of your sheet. Categories come from its Categories tab.' : 'Spending categories have a weekly budget. Unspent money is saved; overspending carries into next week.'}</p>
+      <p class="hint">${isRemote() && !editable ? 'Budget changes are written to the Budget tab of your sheet. Categories come from its Categories tab.' : isGoogle() ? 'Changes are saved to your Google Sheet.' : 'Spending categories have a weekly budget. Unspent money is saved; overspending carries into next week.'}</p>
 
       ${isDemo() ? '' : `<h3 class="grp">Backup & moving phones</h3>
       <div class="card form">
         <button class="row act" id="backupSave">${icon('shield', 18)}<span>Save full backup</span></button>
-        ${editable ? `<label class="row act">${icon('sync', 18)}<span>Restore from backup</span><input type="file" id="backupLoad" accept=".json,application/json" hidden></label>` : ''}
+        ${local ? `<label class="row act">${icon('sync', 18)}<span>Restore from backup</span><input type="file" id="backupLoad" accept=".json,application/json" hidden></label>` : ''}
         <button class="row act" id="exportCsv">${icon('note', 18)}<span>Export CSV</span></button>
-        ${editable ? `<label class="row act">${icon('list', 18)}<span>Import CSV</span><input type="file" id="importCsv" accept=".csv,text/csv" hidden></label>` : ''}
+        ${local ? `<label class="row act">${icon('list', 18)}<span>Import CSV</span><input type="file" id="importCsv" accept=".csv,text/csv" hidden></label>` : ''}
       </div>
-      <p class="hint">${editable ? '<b>Full backup</b> keeps everything (entries, categories and budgets). Use it to move to a new phone: save it here, then on the new phone choose <b>Restore from backup</b>. CSV is for spreadsheets and bank exports.' : 'Save every entry, category and budget as a backup file, or download entries as CSV.'}</p>`}
+      <p class="hint">${local ? '<b>Full backup</b> keeps everything (entries, categories and budgets). Use it to move to a new phone: save it here, then on the new phone choose <b>Restore from backup</b>. CSV is for spreadsheets and bank exports.' : 'Save every entry, category and budget as a backup file, or download entries as CSV.'}</p>`}
 
       <h3 class="grp">Install on a phone</h3>
       <div class="card install-card">${install.installGuideHTML({ showQR: true })}</div>
@@ -700,8 +845,18 @@ function settingsSheet({ showConnect = false } = {}) {
         <div class="row"><span>Budget year</span><b>${e.year}</b></div>
         <div class="row"><span>Weeks per block</span><b>${e.weeksPerBlock}</b></div>
       </div>
-      ${editable ? '<button class="txt-btn bad center" id="eraseAll">Erase all data on this device</button>' : ''}
-      ${m === 'sheet' ? '<button class="txt-btn bad center" id="disconnect">Disconnect Google Sheet</button>' : ''}
+      <h3 class="grp">Updates & privacy</h3>
+      <div class="card form">
+        ${track.signedUpEmail()
+          ? `<div class="row"><span>Updates</span><b class="muted ellip">${esc(track.signedUpEmail())}</b></div>`
+          : `<label><span>Email</span><input id="upEmail" type="email" inputmode="email" autocomplete="email" placeholder="you@example.com"></label>
+             <button class="row act" id="upSend">${icon('check', 18)}<span>Email me about new features</span></button>`}
+        <label class="row toggle"><span>Share anonymous usage stats</span><input type="checkbox" id="anaToggle" ${track.analyticsOn() ? 'checked' : ''}></label>
+        <a class="row act" href="privacy.html" target="_blank" rel="noopener">${icon('shield', 18)}<span>Privacy policy</span></a>
+      </div>
+      <p class="hint">Your email is optional and only used for occasional Hesab news. Usage stats are anonymous: never your money, entries or name.</p>
+      ${local ? '<button class="txt-btn bad center" id="eraseAll">Erase all data on this device</button>' : ''}
+      ${isRemote() ? '<button class="txt-btn bad center" id="disconnect">Disconnect Google Sheet</button>' : ''}
     </div>`;
 
   openSheet(html, {
@@ -709,9 +864,10 @@ function settingsSheet({ showConnect = false } = {}) {
     onMount(wrap) {
       wrap.querySelectorAll('[data-src]').forEach((b) => b.addEventListener('click', () => {
         const target = b.dataset.src;
-        if (target === 'sheet') { $('#sheetForm', wrap).hidden = false; $('#sUrl', wrap).focus(); return; }
+        if (target === m) return;
+        if (target === 'google') { googleSheetChooser(); return; }
         if (m === 'local') return;
-        if (m === 'sheet') {
+        if (isRemote()) {
           const n = state.snapshot.transactions.length;
           if (!confirm(`Copy your ${n} entries, categories and budget from the sheet to this device and stop syncing? Your sheet is not changed.`)) return;
           const copy = structuredClone(state.snapshot);
@@ -721,6 +877,19 @@ function settingsSheet({ showConnect = false } = {}) {
         }
         closeSheet(); startFresh();
       }));
+
+      $('#showScript', wrap)?.addEventListener('click', (ev) => { ev.currentTarget.hidden = true; $('#sheetForm', wrap).hidden = false; $('#sUrl', wrap).focus(); });
+      wrap.querySelectorAll('[data-g]').forEach((b) => b.addEventListener('click', () => {
+        const act = b.dataset.g;
+        if (act === 'sync') { closeSheet(); refresh(); }
+        if (act === 'signin') g.signIn({ after: 'sync' });
+        if (act === 'change') googleSheetChooser();
+      }));
+      $('#upSend', wrap)?.addEventListener('click', async () => {
+        try { await track.signUp($('#upEmail', wrap).value, mode()); toast('Thanks! You’re on the list'); settingsSheet(); }
+        catch (err) { toast(err.message, 'bad'); }
+      });
+      $('#anaToggle', wrap)?.addEventListener('change', (ev) => { track.setAnalytics(ev.target.checked); toast(ev.target.checked ? 'Thanks for helping improve Hesab' : 'Usage stats turned off'); });
 
       $('#connect', wrap).addEventListener('click', async (ev) => {
         const url = $('#sUrl', wrap).value.trim(), token = $('#sTok', wrap).value.trim();
@@ -775,8 +944,10 @@ function settingsSheet({ showConnect = false } = {}) {
         clearLocal(); store.set(LS.mode, null); closeSheet(); state.snapshot = null; state.engine = null; render();
       });
       $('#disconnect', wrap)?.addEventListener('click', () => {
+        if (pendingCount() && !confirm(`${pendingCount()} change(s) haven't reached your sheet yet and will be lost. Disconnect anyway?`)) return;
         if (!confirm('Disconnect this phone from your sheet? Your sheet is not changed.')) return;
-        [LS.url, LS.token, LS.cache, LS.synced, LS.mode].forEach((k) => store.set(k, null));
+        if (isGoogle()) { g.signOut(); sheetsClient = null; }
+        [LS.url, LS.token, LS.cache, LS.synced, LS.mode, LS.queue].forEach((k) => store.set(k, null));
         state.synced = null; state.snapshot = null; state.engine = null; closeSheet(); render();
       });
     },
@@ -859,7 +1030,7 @@ function welcomeView() {
     </ul>
     <div class="w-actions">
       <button class="primary" data-act="start">Start my budget</button>
-      <button class="ghost" data-act="connectSheet">Use my Google Sheet</button>
+      <button class="ghost g-btn" data-act="connectGoogle"><svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34.1 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34.1 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>Sync with Google Sheets</button>
       <label class="txt-btn center restore">Restore from a backup<input type="file" id="welcomeRestore" accept=".json,application/json" hidden></label>
       <button class="txt-btn center" data-act="sample">Explore with sample data</button>
     </div>
@@ -896,7 +1067,7 @@ document.addEventListener('click', (ev) => {
     return;
   }
   const act = t.dataset.act, e = state.engine;
-  if (!e && !['start', 'sample', 'connectSheet', 'installGuide', 'shareLink'].includes(act)) return;
+  if (!e && !['start', 'sample', 'connectSheet', 'connectGoogle', 'installGuide', 'shareLink'].includes(act)) return;
   switch (act) {
     case 'settings': settingsSheet(); break;
     case 'welcome': store.set(LS.mode, null); state.snapshot = null; state.engine = null; render(); window.scrollTo({ top: 0 }); break;
@@ -907,6 +1078,8 @@ document.addEventListener('click', (ev) => {
     case 'shareLink': install.shareLink().then((r) => r === 'copied' && toast('Link copied')); break;
     case 'sample': useMode('demo', demoSnapshot()); break;
     case 'connectSheet': setSnapshot(starterSnapshot()); settingsSheet({ showConnect: true }); break;
+    case 'connectGoogle': if (!state.engine) setSnapshot(starterSnapshot()); googleSheetChooser(); break;
+    case 'gsignin': g.signIn({ after: 'sync' }); break;
     case 'sync': refresh(); break;
     case 'prevWeek': state.week = Math.max(1, state.week - 1); state.block = e.blockOf(state.week); render(); break;
     case 'nextWeek': state.week = Math.min(WEEKS, state.week + 1); state.block = e.blockOf(state.week); render(); break;
@@ -940,15 +1113,31 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 // ───────────────────────────────────────────── boot
 
 (function boot() {
-  // Earlier versions had no mode flag: a saved URL means the Google Sheet.
+  // Coming back from Google's sign-in page?
+  const back = g.handleRedirect();
+  // Earlier versions had no mode flag: a saved URL means the Apps Script sheet.
   if (!mode() && store.get(LS.url) && store.get(LS.token)) store.set(LS.mode, 'sheet');
   const m = mode();
   if (m === 'local') { const s = loadLocal(); if (s) setSnapshot(s); else store.set(LS.mode, null); }
-  else if (m === 'sheet') {
+  else if (m === 'sheet' || m === 'google') {
     const cached = store.get(LS.cache);
     try { setSnapshot(cached ? JSON.parse(cached) : starterSnapshot()); } catch { setSnapshot(starterSnapshot()); }
   } else if (m === 'demo') setSnapshot(demoSnapshot());
-  render();
-  refresh({ quiet: true });
+
+  if (back) {
+    if (!state.engine) setSnapshot(isLocal() ? loadLocal() || starterSnapshot() : starterSnapshot());
+    render();
+    if (back.ok && (back.after === 'create' || back.after === 'pick')) googleConnect(back.after);
+    else if (back.ok) refresh();
+    else if (back.error !== 'interaction_required' && back.error !== 'login_required' && back.error !== 'consent_required') {
+      toast(back.error === 'access_denied' ? 'Google sign-in was cancelled.' : 'Google sign-in did not finish. Try again.', 'bad');
+    }
+  } else {
+    // Google tokens last an hour; renew quietly once per launch if we've signed in before.
+    if (m === 'google' && !g.hasToken() && g.trySilentRefresh('sync')) return;
+    render();
+    refresh({ quiet: true });
+  }
+  track.ping(mode());
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
