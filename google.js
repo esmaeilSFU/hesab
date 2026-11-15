@@ -2,7 +2,7 @@
 // Google Picker to choose a spreadsheet, and direct Sheets API calls from the phone.
 // Scope is drive.file: the app can only open sheets the user picks or that it created.
 import { ApiError } from './api.js';
-import { todayISO } from './engine.js';
+import { todayISO, parseRepeat, repeatValue } from './engine.js';
 
 export const GOOGLE = {
   clientId: '245754808267-njukruqopk9hqrclcoil0htdtlg559fo.apps.googleusercontent.com',
@@ -197,7 +197,7 @@ export class SheetsClient {
 
   async bootstrap() {
     const meta = await this.#meta();
-    const ranges = ['Ledger!A2:G', 'Categories!A2:C', 'Budget!A2:C'];
+    const ranges = ['Ledger!A2:G', 'Categories!A2:C', 'Budget!A2:D'];
     const hasYear = 'Weekly_Control' in meta.tabs, hasBlock = '4Week_Report' in meta.tabs;
     if (hasYear) ranges.push('Weekly_Control!B1');
     if (hasBlock) ranges.push('4Week_Report!D2');
@@ -207,7 +207,7 @@ export class SheetsClient {
     const categories = v(1).map((row, i) => ({ name: String(row[0] ?? '').trim(), type: String(row[1] ?? '').trim(), expenseType: String(row[2] ?? '').trim(), order: i + 1 }))
       .filter((c) => c.name);
     const meta2 = Object.fromEntries(categories.map((c) => [c.name, c]));
-    const budget = v(2).map((row) => ({ category: String(row[0] ?? '').trim(), weeklyTarget: Number(row[1]) || 0, monthlyPlan: Number(row[2]) || 0 }))
+    const budget = v(2).map((row) => ({ category: String(row[0] ?? '').trim(), weeklyTarget: Number(row[1]) || 0, monthlyPlan: Number(row[2]) || 0, repeat: repeatValue(parseRepeat(row[3])) }))
       .filter((b) => b.category && b.category.toLowerCase() !== 'total');
 
     const transactions = [], seen = new Set();
@@ -311,13 +311,15 @@ export class SheetsClient {
       const meta = await this.#meta();
       if (!meta.template) throw new ApiError('not_found', `"${category}" is not in the Budget tab of your sheet.`);
       const row = rows.length + 1;
-      await call(`${this.id}/values/${q(`Budget!A${row}:C${row}`)}?valueInputOption=RAW`, { method: 'PUT', body: { values: [[category, col === 'B' ? value : '', col === 'C' ? value : '']] } });
+      await call(`${this.id}/values/${q(`Budget!A${row}:D${row}`)}?valueInputOption=RAW`, { method: 'PUT', body: { values: [[category, ...['B', 'C', 'D'].map((c) => (c === col ? value : ''))]] } });
       return;
     }
     await call(`${this.id}/values/${q(`Budget!${col}${i + 1}`)}?valueInputOption=RAW`, { method: 'PUT', body: { values: [[value]] } });
   }
   setBudget(category, weeklyTarget) { return this.#budgetCell(category, 'B', weeklyTarget); }
   setPlan(category, monthlyPlan) { return this.#budgetCell(category, 'C', monthlyPlan); }
+  /** Column D: the day of the month a bill or income is added by itself (blank = off). */
+  setRepeat(category, value) { return this.#budgetCell(category, 'D', value || ''); }
 
   /** Only for sheets Hesab created: rewrites Categories and Budget, and renames categories in the Ledger. */
   async saveCategories(snapshot, renames = {}) {
@@ -327,11 +329,12 @@ export class SheetsClient {
     const isVar = (c) => c.type === 'Expense' && c.expenseType === 'Variable';
     const budget = cats.map((c) => {
       const b = snapshot.budget.find((x) => x.category === c.name) || {};
-      return [c.name, isVar(c) ? b.weeklyTarget || 0 : '', !isVar(c) && b.monthlyPlan ? b.monthlyPlan : ''];
-    }).filter((r) => r[1] !== '' || r[2] !== '');
+      return [c.name, isVar(c) ? b.weeklyTarget || 0 : '', !isVar(c) && b.monthlyPlan ? b.monthlyPlan : '', !isVar(c) && b.repeat ? b.repeat : ''];
+    }).filter((r) => r[1] !== '' || r[2] !== '' || r[3] !== '');
     const data = [
       { range: 'Categories!A2:C', values: cats.map((c) => [c.name, c.type, c.expenseType]) },
-      { range: 'Budget!A2:C', values: budget },
+      { range: 'Budget!A2:D', values: budget },
+      { range: 'Budget!D1', values: [['Repeats']] },
     ];
     // Keep every Ledger row in step: renamed categories get the new name, and rows whose stored
     // Type / Expense Type no longer match their category (its kind was changed) are corrected.
@@ -349,7 +352,7 @@ export class SheetsClient {
         data.push({ range: `Ledger!D${i + 2}:E${i + 2}`, values: [[c.type, c.expenseType]] });
       }
     });
-    await call(`${this.id}/values:batchClear`, { method: 'POST', body: { ranges: ['Categories!A2:C', 'Budget!A2:C'] } });
+    await call(`${this.id}/values:batchClear`, { method: 'POST', body: { ranges: ['Categories!A2:C', 'Budget!A2:D'] } });
     await call(`${this.id}/values:batchUpdate`, { method: 'POST', body: { valueInputOption: 'RAW', data } });
   }
 }
@@ -364,7 +367,7 @@ export async function createSheet(starter) {
     sheets: [
       { properties: { sheetId: 1, title: 'Ledger', gridProperties: { frozenRowCount: 1 } }, data: [{ rowData: [head(LEDGER_HEAD)] }] },
       { properties: { sheetId: 2, title: 'Categories', gridProperties: { frozenRowCount: 1 } }, data: [{ rowData: [head(['Category', 'Type', 'Expense Type']), ...rows(cats.map((c) => [c.name, c.type, c.expenseType]))] }] },
-      { properties: { sheetId: 3, title: 'Budget', gridProperties: { frozenRowCount: 1 } }, data: [{ rowData: [head(['Category', 'Weekly Target', 'Monthly Plan']), ...rows(starter.budget.map((b) => [b.category, b.weeklyTarget || '', b.monthlyPlan || '']))] }] },
+      { properties: { sheetId: 3, title: 'Budget', gridProperties: { frozenRowCount: 1 } }, data: [{ rowData: [head(['Category', 'Weekly Target', 'Planned Amount', 'Repeats']), ...rows(starter.budget.map((b) => [b.category, b.weeklyTarget || '', b.monthlyPlan || '', b.repeat || '']))] }] },
       { properties: { sheetId: 4, title: '_hesab', hidden: true }, data: [{ rowData: rows([['Created by Hesab', 'https://esmaeilsfu.github.io/hesab/'], ['Do not rename the Ledger, Categories or Budget tabs.', '']]) }] },
     ],
   };

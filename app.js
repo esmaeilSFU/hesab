@@ -1,4 +1,4 @@
-import { Engine, WEEKS, todayISO, kindOf, isIncome, isVariable, isFixed } from './engine.js';
+import { Engine, todayISO, kindOf, isIncome, isVariable, isFixed, parseRepeat, repeatValue, repeatLabel, repeatDates, ordinal, addDays, ESTIMATED, isEstimated } from './engine.js';
 import { Api } from './api.js';
 import { demoSnapshot } from './demo.js';
 import { starterSnapshot, loadLocal, saveLocal, clearLocal, newId, toCSV, importCSV, toBackup, fromBackup, saveFile } from './data.js';
@@ -8,6 +8,7 @@ import * as chart from './charts.js';
 import * as install from './install.js';
 import * as g from './google.js';
 import * as track from './track.js';
+import * as lists from './lists.js';
 
 // ───────────────────────────────────────────── state
 //
@@ -28,9 +29,8 @@ const state = {
   engine: null,
   tab: 'week',
   week: 1,
-  block: 1,
   month: 0,
-  insights: 'week',
+  insights: 'month',
   filter: 'all',
   search: '',
   syncing: false,
@@ -65,7 +65,6 @@ function setSnapshot(snap, { keepWeek = false } = {}) {
   state.snapshot = snap;
   state.engine = new Engine(snap);
   if (!keepWeek || wasCurrent || !state.week) state.week = state.engine.currentWeek;
-  state.block = state.engine.blockOf(state.week);
   if (!keepWeek || !state.month) state.month = state.engine.currentMonth;
   if (isRemote()) store.set(LS.cache, JSON.stringify(snap));
   if (isLocal() && !saveLocal(snap)) toast('Storage is full. Export a backup in Settings.', 'bad');
@@ -112,6 +111,7 @@ async function runOp(client, op) {
     case 'delete': await client.remove(op.tx); return (s) => s.transactions.forEach((t) => { if (t.row > op.tx.row) t.row -= 1; });
     case 'budget': await client.setBudget(op.category, op.value); return null;
     case 'plan': await client.setPlan(op.category, op.value); return null;
+    case 'repeat': await client.setRepeat(op.category, op.value); return null;
     case 'categories': await client.saveCategories(state.snapshot, op.renames || {}); return null;
     default: return null;
   }
@@ -139,24 +139,27 @@ async function flushQueue() {
 
 async function refresh({ quiet = false } = {}) {
   if (!mode()) return;
-  if (isLocal()) { const s = loadLocal(); if (s) setSnapshot(s, { keepWeek: true }); render(); return; }
+  if (isLocal()) { const s = loadLocal(); if (s) setSnapshot(s, { keepWeek: true }); render(); autoAdd(); return; }
   if (isDemo()) { if (!state.snapshot) setSnapshot(demoSnapshot()); render(); return; }
   const client = api();
   if (!client || state.syncing) return;
   if (isGoogle() && !g.hasToken()) { render(); return; }
   state.syncing = true; renderChrome();
+  let ok = false;
   try {
     if (isGoogle()) await flushQueue();
     const snap = await client.bootstrap();
     setSnapshot(snap, { keepWeek: true });
     state.synced = new Date().toISOString();
     store.set(LS.synced, state.synced);
+    ok = true;
   } catch (e) {
     if (!quiet || !state.snapshot) toast(e.message, 'bad');
   } finally {
     state.syncing = false;
     render();
   }
+  if (ok && isGoogle()) autoAdd();
 }
 
 async function mutate(optimistic, op, successMsg) {
@@ -190,13 +193,13 @@ async function mutate(optimistic, op, successMsg) {
   }
 }
 
-function addEntry(entry) {
+function addEntry(entry, { quiet = false } = {}) {
   const meta = catByName(entry.category) || {};
   const remote = !!api();
   const tempId = remote ? 'pending-' + Date.now() : newId();
   const temp = { row: remote ? -1 : 0, id: tempId, timestamp: new Date().toISOString(), date: entry.date, amount: entry.amount,
     type: meta.type || 'Expense', expenseType: meta.expenseType || '', category: entry.category, note: entry.note };
-  return mutate((s) => s.transactions.push(temp), { kind: 'add', entry, tempId }, `Saved · ${entry.category} ${money(entry.amount)}`);
+  return mutate((s) => s.transactions.push(temp), { kind: 'add', entry, tempId }, quiet ? null : `Saved · ${entry.category} ${money(entry.amount)}`);
 }
 
 function updateEntry(tx, entry) {
@@ -216,6 +219,7 @@ function stillSending(tx) {
 }
 
 function deleteEntry(tx) {
+  if (isEstimated(tx) || tx.note === 'Repeating') rememberSkipped(tx);
   return mutate((s) => { s.transactions = s.transactions.filter((t) => t.id !== tx.id); }, { kind: 'delete', tx: structuredClone(tx) }, 'Deleted');
 }
 
@@ -233,13 +237,87 @@ function setPlan(category, value) {
   );
 }
 
+const canAutoAdd = () => isLocal() || isGoogle();
+let autoRunning = false;
+/** Repeating bills and income are recorded by themselves on their dates in the current month.
+ *  A date counts as done when the month already has an entry for that category near it (monthly: any entry). */
+async function autoAdd() {
+  if (autoRunning || !canAutoAdd() || !state.engine) return;
+  const e = state.engine, today = todayISO(), ym = today.slice(0, 7);
+  const prev = new Date(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)) - 2, 15);
+  const prevYm = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`;
+  const skipped = skippedSet();
+  const adds = [];
+  const missing = (c, r, month, upTo) => {
+    const have = state.snapshot.transactions.filter((t) => t.category === c.name && t.date.slice(0, 7) === month).map((t) => t.date);
+    const out = [];
+    for (const d of repeatDates(r, month).filter((x) => x <= upTo)) {
+      if (r.kind === 'month') { if (!have.length) out.push(d); continue; }
+      const i = have.findIndex((x) => Math.abs((new Date(x) - new Date(d)) / 86400000) <= Math.min(6, r.every * 7 - 1));
+      if (i >= 0) have.splice(i, 1); else out.push(d);
+    }
+    return out.filter((d) => !skipped.has(`${c.name}|${d}`));
+  };
+  for (const c of categories()) {
+    const r = e.repeats[c.name];
+    if (isVariable(c) || !r) continue;
+    // This month: fixed amounts are recorded on their dates. Changing amounts wait for the user.
+    if (!r.varies && e.plans[c.name] > 0) for (const d of missing(c, r, ym, today)) adds.push({ c, d, amount: e.plans[c.name], note: 'Repeating' });
+    // Last month ended without them: fill in a best guess and flag it so the user checks it.
+    if (r.since && r.since <= prevYm) {
+      for (const d of missing(c, r, prevYm, '9999')) {
+        const amount = r.varies ? lastAmount(c.name, prevYm) || e.plans[c.name] || e.typical(c.name, prevYm) : e.plans[c.name];
+        if (amount > 0) adds.push({ c, d, amount, note: ESTIMATED });
+      }
+    }
+  }
+  if (!adds.length) return;
+  autoRunning = true;
+  try {
+    for (const a of adds) await addEntry({ amount: a.amount, category: a.c.name, date: a.d, note: a.note }, { quiet: true });
+    const est = adds.filter((a) => a.note === ESTIMATED);
+    toast(est.length ? `${est.length} missed ${est.length === 1 ? 'entry was' : 'entries were'} filled in for last month. Please check them.` : `Added: ${[...new Set(adds.map((a) => a.c.name))].join(', ')}`, est.length ? 'bad' : undefined);
+  } finally { autoRunning = false; }
+}
+
+/** The most recent amount recorded for a category before a month. */
+function lastAmount(category, beforeYm) {
+  const t = newestFirst().find((x) => x.category === category && x.date.slice(0, 7) < beforeYm && !isEstimated(x));
+  return t ? t.amount : 0;
+}
+
+// Auto-filled entries the user deleted (it really wasn't paid) are remembered so they aren't filled in again.
+const SKIP_KEY = 'hesab.skipped';
+const skippedSet = () => { try { return new Set(JSON.parse(store.get(SKIP_KEY)) || []); } catch { return new Set(); } };
+function rememberSkipped(t) {
+  const set = skippedSet(); set.add(`${t.category}|${t.date}`);
+  store.set(SKIP_KEY, JSON.stringify([...set].slice(-300)));
+}
+
+/** One tap: record one payment of a bill (or one income) at its planned amount. */
+function markPaid(category, ym) {
+  const e = state.engine, today = todayISO();
+  const amount = e.plans[category] || 0;
+  const dates = repeatDates(e.repeats[category], ym);
+  if (e.repeats[category]?.varies || !amount) {
+    // the amount is different each time: open a new entry for this bill with the date filled in, ready for the amount
+    const date = today.slice(0, 7) === ym ? today : dates[0] || `${ym}-01`;
+    entrySheet(null, { category, date });
+    return;
+  }
+  const days = new Date(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0).getDate();
+  const have = state.snapshot.transactions.filter((t) => t.category === category && t.date.slice(0, 7) === ym).length;
+  const date = today.slice(0, 7) === ym ? today : dates[have] || dates[0] || `${ym}-${String(days).padStart(2, '0')}`;
+  addEntry({ amount, category, date, note: '' });
+}
+
 /** Category edits: on this device, or in a sheet that Hesab created (its Categories tab is rewritten). */
 function syncCategories(renames = {}) {
   if (!isGoogle()) return;
   mutate(() => {}, { kind: 'categories', renames }, null);
 }
 
-function saveCategory(oldName, { name, kind, target, plan }) {
+function saveCategory(oldName, { name, kind, target, plan, repeat = '' }) {
   const s = state.snapshot;
   name = name.trim();
   if (!name) return 'Give the category a name.';
@@ -255,10 +333,12 @@ function saveCategory(oldName, { name, kind, target, plan }) {
   s.budget = s.budget.filter((b) => b.category !== oldName && b.category !== name);
   const weeklyTarget = kind === 'variable' ? Math.max(0, Number(target) || 0) : 0;
   const monthlyPlan = kind !== 'variable' ? Math.max(0, Number(plan) || 0) : 0;
-  if (weeklyTarget || monthlyPlan || kind === 'variable') s.budget.push({ category: name, weeklyTarget, monthlyPlan });
+  const rep = kind !== 'variable' && (monthlyPlan > 0 || parseRepeat(repeat)?.varies) ? repeatValue(parseRepeat(repeat)) : '';
+  if (weeklyTarget || monthlyPlan || rep || kind === 'variable') s.budget.push({ category: name, weeklyTarget, monthlyPlan, repeat: rep });
   setSnapshot(s, { keepWeek: true });
   render();
   syncCategories(oldName && oldName !== name ? { [oldName]: name } : {});
+  autoAdd();
   return null;
 }
 
@@ -393,7 +473,8 @@ function render() {
   if (!mode()) { view().innerHTML = welcomeView(); view().dataset.tab = 'welcome'; return; }
   if (!state.engine) return;
   renderChrome();
-  const html = state.tab === 'week' ? weekView() : state.tab === 'activity' ? activityView() : insightsView();
+  document.body.classList.toggle('on-lists', state.tab === 'lists');
+  const html = state.tab === 'week' ? weekView() : state.tab === 'activity' ? activityView() : state.tab === 'lists' ? lists.view(header) : insightsView();
   view().innerHTML = html;
   view().dataset.tab = state.tab;
   renderInstallBanner();
@@ -435,7 +516,7 @@ function header(title, subtitle, { nav = false } = {}) {
         <h1>${esc(title)}</h1>
         ${subtitle ? `<p>${subtitle}</p>` : ''}
       </div>
-      ${nav ? `<button class="chev" data-act="nextWeek" aria-label="Next week" ${state.week >= WEEKS ? 'disabled' : ''}>${icon('right', 20, 2.4)}</button>` : ''}
+      ${nav ? `<button class="chev" data-act="nextWeek" aria-label="Next week" ${state.week >= state.engine.weeks ? 'disabled' : ''}>${icon('right', 20, 2.4)}</button>` : ''}
     </div>
   </header>`;
 }
@@ -457,7 +538,7 @@ function txRow(t, { date = false } = {}) {
   const sub = date ? `${esc(t.category)} · ${shortDate(t.date)}` : esc(t.category);
   return `<button class="tx" data-act="edit" data-id="${esc(t.id)}">
     ${catIcon(t.category)}
-    <span class="tx-main"><span class="tx-t">${esc(t.note || t.category)}</span><span class="tx-s">${sub}${t.row < 0 ? ' · saving…' : ''}</span></span>
+    <span class="tx-main"><span class="tx-t">${esc(isEstimated(t) ? t.category : t.note || t.category)}</span><span class="tx-s">${isEstimated(t) ? `<span class="warnTxt">${icon('alert', 12, 2.4)} Filled in for you · tap to check</span>` : sub}${t.row < 0 ? ' · saving…' : ''}</span></span>
     <span class="tx-a ${isIncome(t) ? 'inc' : ''}">${isIncome(t) ? money(t.amount, { sign: true }) : money(t.amount)}</span>
   </button>`;
 }
@@ -485,6 +566,7 @@ function weekView() {
   return `
   ${header(isCurrent ? 'This Week' : `Week ${w}`, `${isCurrent ? `Week ${w} · ` : ''}${weekRange(days)}`, { nav: true })}
   ${isDemo() ? demoBanner() : ''}
+  ${estimatedBanner()}
 
   <section class="card hero">
     <div class="hero-ring">${chart.ring(progress)}
@@ -509,7 +591,7 @@ function weekView() {
 
   <section class="card list">
     <div class="card-h"><h2>Categories</h2><span class="muted">${lines.filter((l) => l.remaining < 0).length ? `${lines.filter((l) => l.remaining < 0).length} over` : 'All good'}</span></div>
-    ${lines.map((l) => catLine(l, [days[0], days[6]])).join('')}
+    ${lines.map((l) => catLine(l, [days[0], days.at(-1)])).join('')}
   </section>
 
   <section class="card list">
@@ -533,6 +615,18 @@ function catLine(l, range = null) {
       <div class="cl-sub">${money(l.spent, { cents: false })} of ${money(l.target, { cents: false })}${l.carried < -0.5 ? ` <em>· ${money(l.carried, { cents: false })} carried</em>` : ''}</div>
     </div>
   </${tag}>`;
+}
+
+function estimatedBanner() {
+  const est = state.snapshot.transactions.filter(isEstimated);
+  if (!est.length) return '';
+  const ym = est.map((t) => t.date.slice(0, 7)).sort()[0];
+  const names = [...new Set(est.map((t) => t.category))];
+  return `<button class="card demo est-banner" data-act="reviewEst" data-ym="${ym}">
+    <span class="demo-ic">${icon('alert', 20)}</span>
+    <span><b>${est.length} ${est.length === 1 ? 'entry was' : 'entries were'} filled in for you</b><small>${esc(names.slice(0, 3).join(', '))}${names.length > 3 ? '…' : ''} weren't recorded last month. Tap to check.</small></span>
+    ${icon('right', 16)}
+  </button>`;
 }
 
 const demoBanner = () => `<button class="card demo" data-act="welcome">
@@ -584,16 +678,17 @@ function groupsHTML(groups) {
 // ───────────────────────────────────────────── Insights
 
 function insightsView() {
-  const seg = [['week', 'Week'], ['block', '4 Weeks'], ['month', 'Month'], ['year', 'Year']];
-  const views = { week: insightsWeek, block: insightsBlock, month: insightsMonth, year: insightsYear };
-  const body = (views[state.insights] || insightsWeek)();
+  const seg = [['trends', 'Trends'], ['month', 'Month'], ['year', 'Year']];
+  const views = { trends: insightsTrends, month: insightsMonth, year: insightsYear };
+  if (!views[state.insights]) state.insights = 'month';
+  const body = views[state.insights]();
   return `
   ${header('Insights', `${state.engine.year}`)}
   <div class="seg">${seg.map(([k, l]) => `<button class="${state.insights === k ? 'on' : ''}" data-act="insights" data-m="${k}">${l}</button>`).join('')}</div>
   ${body}`;
 }
 
-function insightsWeek() {
+function insightsTrends() {
   const e = state.engine;
   const cur = e.currentWeek;
   const bars = e.weekBars(cur, 16);
@@ -622,43 +717,22 @@ function insightsWeek() {
   </section>
 
   <section class="card">
-    <div class="card-h"><h2>Saved so far</h2><span class="muted">${tracked} tracked week${tracked === 1 ? '' : 's'}</span></div>
+    <div class="card-h"><h2>Under budget so far</h2><span class="muted">${tracked} tracked week${tracked === 1 ? '' : 's'}</span></div>
     <p class="kpi good">${money(totalSavings, { cents: false })}</p>
-    <p class="hint">Money left unspent in each category, counted only for weeks where you logged something. Overspending carries into the next week instead.</p>
+    ${savedPeriod(state.week)}
+    <p class="hint">Weekly budget you didn't use, per category, counted only for weeks with entries (overspending carries into the next week instead). This is not money saved: see Month → Left to save or invest for that.</p>
     ${savings.length ? chart.hbars(savings.map((s) => ({ category: s.category.name, amount: s.amount }))) : ''}
   </section>`;
 }
 
-function insightsBlock() {
+/** Which dates "Under budget so far" covers: from the first week with an entry to the end of the selected week. */
+function savedPeriod(throughWeek) {
   const e = state.engine;
-  const b = e.block(state.block);
-  const [w1, w2] = b.weeks;
-  const items = b.lines.map((l) => ({ category: l.category.name, amount: l.spent })).filter((i) => i.amount > 0).sort((a, c) => c.amount - a.amount);
-  return `
-  <div class="stepper">
-    <button class="chev" data-act="prevBlock" ${state.block <= 1 ? 'disabled' : ''} aria-label="Previous block">${icon('left', 20, 2.4)}</button>
-    <div><b>Block ${b.block}</b><span>Weeks ${w1}–${w2} · ${shortDate(e.firstDay(w1))} – ${shortDate(e.daysOf(w2)[6])}</span></div>
-    <button class="chev" data-act="nextBlock" ${state.block >= e.blockCount ? 'disabled' : ''} aria-label="Next block">${icon('right', 20, 2.4)}</button>
-  </div>
-  <div class="tiles four">
-    <div class="tile"><span>Income</span><b class="inc">${compact(b.income)}</b></div>
-    <div class="tile"><span>Spending</span><b>${compact(b.variableSpent)}</b></div>
-    <div class="tile"><span>Bills</span><b>${compact(b.fixed)}</b></div>
-    <div class="tile"><span>Net</span><b class="${b.net < 0 ? 'neg' : 'pos'}">${compact(b.net)}</b></div>
-  </div>
-  ${guideCard(blockGuide(b))}
-  ${planCard(e.daysOf(w2)[6] < todayISO() ? e.daysOf(w2)[6].slice(0, 7) : todayISO().slice(0, 7))}
-  <section class="card">
-    <div class="card-h"><h2>Where it went</h2><span class="muted">${money(b.variableSpent, { cents: false })} of ${money(b.variableTarget, { cents: false })}</span></div>
-    <div class="donut-row">
-      ${chart.donut(items)}
-      <ul class="legend-list">${items.slice(0, 6).map((i) => `<li><i style="background:${catStyle(i.category).color}"></i><span>${esc(i.category)}</span><b>${Math.round((100 * i.amount) / (b.variableSpent || 1))}%</b></li>`).join('')}</ul>
-    </div>
-  </section>
-  <section class="card list">
-    <div class="card-h"><h2>Budget vs actual</h2></div>
-    ${b.lines.map((l) => catLine({ category: l.category, spent: l.spent, target: l.target, carried: 0, available: l.target, remaining: l.target - l.spent }, [e.firstDay(w1), e.daysOf(w2)[6]])).join('')}
-  </section>`;
+  const first = e.active.findIndex(Boolean) + 1;
+  if (!first || first > throughWeek) return '';
+  const end = e.daysOf(throughWeek).at(-1);
+  const span = throughWeek - first + 1, tracked = e.trackedWeeks(throughWeek), skipped = span - tracked;
+  return `<p class="saved-period">${icon('calendar', 15)}<span><b>${shortDate(e.firstDay(first))} – ${shortDate(end)}, ${e.year}</b> · weeks ${first}–${throughWeek}${skipped > 0 ? `<br>${skipped} week${skipped === 1 ? '' : 's'} with no entries left out` : ''}</span></p>`;
 }
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -678,12 +752,7 @@ function insightsMonth() {
     <div><b>${monthName(m)} ${e.year}</b><span>${shortDate(mo.first)} – ${shortDate(mo.last)} · ${mo.days} days</span></div>
     <button class="chev" data-act="nextMonth" ${m >= 12 ? 'disabled' : ''} aria-label="Next month">${icon('right', 20, 2.4)}</button>
   </div>
-  <div class="tiles four">
-    <div class="tile"><span>Income</span><b class="inc">${compact(mo.income)}</b></div>
-    <div class="tile"><span>Spending</span><b>${compact(mo.variableSpent)}</b></div>
-    <div class="tile"><span>Bills</span><b>${compact(mo.fixed)}</b></div>
-    <div class="tile"><span>Net</span><b class="${mo.net < 0 ? 'neg' : 'pos'}">${compact(mo.net)}</b></div>
-  </div>
+  ${mo.count ? leftCard(mo, e.monthVsPlan(mo.ym), elapsed) : ''}
   ${guideCard(monthGuide(m), elapsed && elapsed < mo.days ? `Day ${elapsed} of ${mo.days}` : '')}
   <section class="card">
     <div class="card-h"><h2>Day by day</h2><span class="legend"><i style="background:var(--spend)"></i>Spending <i class="lg-dash"></i>Daily budget</span></div>
@@ -718,7 +787,7 @@ const hl = (s) => `<b>${esc(s)}</b>`;
 
 function weekGuide(w) {
   const e = state.engine, lines = e.lines(w), sum = e.summary(w), days = e.daysOf(w), today = todayISO();
-  const isCurrent = w === e.currentWeek && days[0] <= today && today <= days[6];
+  const isCurrent = w === e.currentWeek && days[0] <= today && today <= days.at(-1);
   if (days[0] > today) return [];
   const tips = [];
   const over = lines.filter((l) => l.remaining < -0.5).sort((a, c) => a.remaining - c.remaining);
@@ -729,9 +798,9 @@ function weekGuide(w) {
   if (isCurrent) {
     const daysLeft = days.filter((d) => d >= today).length;
     if (sum.remaining < -0.5) tips.push({ tone: 'bad', text: `You're ${hl(usd(-sum.remaining))} over for the week. Anything over comes off next week's budget, so a no-spend day or two now helps most.` });
-    for (const l of over.slice(0, 2)) tips.push({ tone: 'bad', text: `${hl(l.category.name)} is ${usd(-l.remaining)} over. Stop spending on it until Monday, or next week's ${esc(l.category.name)} budget starts at ${usd(Math.max(0, l.target + l.remaining))} instead of ${usd(l.target)}.` });
+    for (const l of over.slice(0, 2)) tips.push({ tone: 'bad', text: `${hl(l.category.name)} is ${usd(-l.remaining)} over. Stop spending on it until ${new Date(days.at(-1) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long' })} night, or next week's ${esc(l.category.name)} budget starts at ${usd(Math.max(0, l.target + l.remaining))} instead of ${usd(l.target)}.` });
     if (sum.remaining > 0.5 && daysLeft) {
-      const elapsedShare = (7 - daysLeft + 1) / 7;
+      const elapsedShare = (days.length - daysLeft + 1) / days.length;
       const usedShare = sum.available > 0 ? sum.spent / sum.available : 1;
       if (usedShare > elapsedShare + 0.15) tips.push({ tone: 'warn', text: `${Math.round(usedShare * 100)}% of this week's budget is gone with ${daysLeft} day${daysLeft > 1 ? 's' : ''} left. Keep to about ${hl(usd(sum.remaining / daysLeft))} a day to finish on budget.` });
       else tips.push({ tone: 'good', text: `On track. Up to ${hl(usd(sum.remaining / daysLeft))} a day for the next ${daysLeft} day${daysLeft > 1 ? 's' : ''} keeps the week under budget.` });
@@ -740,7 +809,7 @@ function weekGuide(w) {
     for (const l of tight.slice(0, 1)) tips.push({ tone: 'warn', text: l.remaining >= 1 ? `Only ${hl(usd(l.remaining))} left for ${esc(l.category.name)} this week.` : `${hl(l.category.name)} is used up for this week. Anything more goes over budget.` });
   } else {
     for (const l of over.slice(0, 2)) tips.push({ tone: 'bad', text: `${hl(l.category.name)} went ${usd(-l.remaining)} over, so week ${w + 1} started with that much less for it.` });
-    if (sum.remaining >= 0) tips.push({ tone: 'good', text: `Finished ${hl(usd(sum.remaining))} under budget. That money is counted in Saved so far.` });
+    if (sum.remaining >= 0) tips.push({ tone: 'good', text: `Finished ${hl(usd(sum.remaining))} under budget. It is added to Under budget so far in Trends.` });
   }
   const carried = lines.reduce((s, l) => s + l.carried, 0);
   if (carried < -0.5) tips.push({ tone: 'info', text: `${usd(-carried)} of overspending was carried in from last week, which is why some categories have less room.` });
@@ -752,6 +821,8 @@ function monthGuide(m) {
   if (mo.first > today) return [{ tone: 'info', text: `${monthName(m)} hasn't started yet. Set monthly amounts for bills and income in Settings so this report can track them.` }];
   if (!mo.count) return [{ tone: 'info', text: `Nothing was logged in ${monthName(m)}.` }];
   const tips = [];
+  const est = state.snapshot.transactions.filter((t) => isEstimated(t) && t.date.slice(0, 7) === mo.ym);
+  if (est.length) tips.push({ tone: 'bad', text: `${hl(`${est.length} ${est.length === 1 ? 'entry' : 'entries'}`)} for ${monthName(m)} ${est.length === 1 ? 'was' : 'were'} filled in for you because nothing was recorded (${[...new Set(est.map((t) => esc(t.category)))].join(', ')}). Tap the ⚠ in Bills & income to confirm or fix ${est.length === 1 ? 'it' : 'them'}.` });
   const isCurrent = today <= mo.last;
   const elapsed = isCurrent ? Number(today.slice(8, 10)) : mo.days;
   const left = mo.days - elapsed;
@@ -775,14 +846,10 @@ function monthGuide(m) {
   const due = plan.rows.filter((r) => r.kind === 'fixed' && r.plan > 0 && r.actual === 0);
   if (isCurrent && due.length) {
     const total = due.reduce((s, r) => s + r.plan, 0);
-    tips.push({ tone: 'info', text: `Still to pay this month: ${due.slice(0, 3).map((r) => `${esc(r.category.name)} ${usd(r.plan)}`).join(', ')}${due.length > 3 ? ` and ${due.length - 3} more` : ''} (${hl(usd(total))}). Keep that much aside.` });
+    const manual = due.filter((r) => !(r.repeat && !r.repeat.varies && canAutoAdd()));
+    tips.push({ tone: 'info', text: `Bills still coming this month: ${due.slice(0, 3).map((r) => `${esc(r.category.name)} ${usd(r.plan)}`).join(', ')}${due.length > 3 ? ` and ${due.length - 3} more` : ''} (${hl(usd(total))}). Keep that much aside.${manual.length ? ` Tap ✓ in Bills & income once paid${manual.some((r) => r.repeat?.varies) ? ' and enter the amount' : ''}.` : ''}` });
   } else if (!isCurrent && due.length) {
-    tips.push({ tone: 'warn', text: `No payment logged for ${due.map((r) => esc(r.category.name)).join(', ')}. Add it if it was paid, so the month is complete.` });
-  }
-  const coming = plan.rows.filter((r) => r.kind === 'income' && r.plan > r.actual);
-  if (isCurrent && coming.length) {
-    const total = coming.reduce((s, r) => s + r.plan - r.actual, 0);
-    tips.push({ tone: 'info', text: `${hl(usd(total))} of income is still expected (${coming.slice(0, 3).map((r) => esc(r.category.name)).join(', ')}), so the net figure will rise when it arrives.` });
+    tips.push({ tone: 'info', text: `${due.map((r) => esc(r.category.name)).join(', ')} ${due.length === 1 ? 'has' : 'have'} no payment for ${monthName(m)}. If ${due.length === 1 ? 'it was' : 'they were'} paid, tap ✓ in Bills & income below.` });
   }
   if (!isCurrent && mo.variableTarget > 0 && mo.variableSpent <= mo.variableTarget) {
     tips.push({ tone: 'good', text: `Everyday spending finished ${hl(usd(mo.variableTarget - mo.variableSpent))} under the ${usd(mo.variableTarget)} budget.` });
@@ -802,15 +869,6 @@ function monthGuide(m) {
       if (Math.abs(ch) >= 0.1) tips.push({ tone: ch < 0 ? 'good' : 'info', text: `Spending was ${Math.round(Math.abs(ch) * 100)}% ${ch < 0 ? 'lower' : 'higher'} than ${monthName(m - 1)}.` });
     }
   }
-  return tips;
-}
-
-function blockGuide(bl) {
-  const over = bl.lines.filter((l) => l.target > 0 && l.spent > l.target).sort((a, c) => (c.spent - c.target) - (a.spent - a.target));
-  const tips = [];
-  if (over[0]) tips.push({ tone: 'warn', text: `${hl(over[0].category.name)} is ${usd(over[0].spent - over[0].target)} over for these 4 weeks${over.length > 1 ? `, the most of ${over.length} categories over budget` : ''}.` });
-  if (bl.variableTarget > 0 && bl.variableSpent <= bl.variableTarget && bl.variableSpent > 0) tips.push({ tone: 'good', text: `Spending is ${usd(bl.variableTarget - bl.variableSpent)} under budget for these 4 weeks.` });
-  if (bl.income > 0 && bl.net < 0) tips.push({ tone: 'bad', text: `Spending and bills were ${hl(usd(-bl.net))} more than came in.` });
   return tips;
 }
 
@@ -868,8 +926,20 @@ function planCard(ym) {
       <p class="hint">Set a monthly amount for each bill and income in Settings to see what's paid, what's still due and what came in.</p>
       <button class="ghost" data-act="settings">${icon('gear', 18)} Set monthly amounts</button></section>`;
   }
+  const today = todayISO(), isFuture = ym > today.slice(0, 7), isNow = ym === today.slice(0, 7);
+  // the next date a repeating item will be recorded by itself, if it is still ahead this month
+  const next = (r) => (r.repeat && !r.repeat.varies && canAutoAdd() && r.actual < r.plan ? r.dates.find((d) => d > today) : null);
+  const estOf = (r) => state.snapshot.transactions.filter((t) => t.category === r.category.name && t.date.slice(0, 7) === ym && isEstimated(t)).length;
   const status = (r) => {
+    if (estOf(r)) return { t: 'Filled in · check', c: 'est', ic: 'alert' };
     if (!r.plan) return { t: 'No plan', c: 'muted', ic: '' };
+    const n = next(r);
+    if (r.repeat?.varies && r.actual === 0) {
+      const dueOn = r.dates[0];
+      if (dueOn && dueOn > today && !isFuture) return { t: `Due ${shortDate(dueOn)}`, c: 'muted', ic: '' };
+      if (!isFuture) return { t: 'Enter amount', c: 'est', ic: 'alert' };
+    }
+    if (n && !r.repeat?.varies) return { t: r.actual === 0 ? `Auto on ${shortDate(n)}` : `Next on ${shortDate(n)}`, c: 'muted', ic: 'sync' };
     if (r.kind === 'income') {
       if (r.actual >= r.plan) return { t: 'Received', c: 'pos', ic: 'check' };
       return r.actual > 0 ? { t: `${money(r.plan - r.actual, { cents: false })} to come`, c: 'muted', ic: '' } : { t: 'Expected', c: 'muted', ic: '' };
@@ -884,10 +954,17 @@ function planCard(ym) {
     const col = r.kind === 'income' ? 'var(--income)' : r.actual > r.plan * 1.02 && r.plan ? 'var(--bad)' : 'var(--spend)';
     const [y, mo] = ym.split('-').map(Number);
     const range = [`${ym}-01`, `${ym}-${String(new Date(y, mo, 0).getDate()).padStart(2, '0')}`];
-    return `<button class="cl tap" data-act="catTx" data-cat="${esc(r.category.name)}" data-from="${range[0]}" data-to="${range[1]}">${catIcon(r.category.name, 36)}<div class="cl-main">
+    const done = r.repeat?.varies ? r.actual > 0 : r.repeat?.kind === 'weeks' ? r.actual >= r.plan - 0.5 : r.actual > 0 && (r.kind === 'fixed' || r.actual >= r.plan);
+    const canTick = (r.plan > 0 || r.repeat?.varies) && !done && !isFuture;
+    const tick = estOf(r)
+      ? `<button class="tick est" data-act="catTx" data-cat="${esc(r.category.name)}" data-from="${range[0]}" data-to="${range[1]}" aria-label="Check ${esc(r.category.name)}">${icon('alert', 16, 2.6)}</button>`
+      : done
+      ? `<span class="tick on" aria-label="Done">${icon('check', 16, 2.8)}</span>`
+      : canTick ? `<button class="tick" data-act="markPaid" data-cat="${esc(r.category.name)}" data-ym="${ym}" aria-label="Mark ${esc(r.category.name)} as ${r.kind === 'income' ? 'received' : 'paid'}">${icon('check', 16, 2.8)}</button>` : '';
+    return `<div class="plan-row"><button class="cl tap" data-act="catTx" data-cat="${esc(r.category.name)}" data-from="${range[0]}" data-to="${range[1]}">${catIcon(r.category.name, 36)}<div class="cl-main">
       <div class="cl-top"><span class="cl-n">${esc(r.category.name)}</span><span class="cl-r ${st.c}">${st.ic ? icon(st.ic, 13, 2.6) + ' ' : ''}${esc(st.t)}</span></div>
       <div class="bar"><i style="width:${pct.toFixed(1)}%;background:${col}"></i></div>
-      <div class="cl-sub">${money(r.actual, { cents: false })} of ${money(r.plan, { cents: false })}</div></div></button>`;
+      <div class="cl-sub">${money(r.actual, { cents: false })} of ${r.repeat?.varies ? '~' : ''}${money(r.plan, { cents: false })}${r.repeat?.varies ? ' est.' : ''}${r.repeat?.kind === 'weeks' && !r.repeat.varies ? ` · ${r.times} × ${money(r.each, { cents: false })}` : ''}${r.repeat && r.repeat.kind !== 'none' ? ` · ${esc(repeatLabel(r.repeat).replace(/^Every month on/, 'monthly,'))}` : ''}</div></div></button>${tick}</div>`;
   };
   const inc = m.rows.filter((r) => r.kind === 'income'), bills = m.rows.filter((r) => r.kind === 'fixed');
   return `<section class="card list">
@@ -898,6 +975,50 @@ function planCard(ym) {
     </div>
     ${inc.length ? `<h3 class="sub-h">Income</h3>${inc.map(row).join('')}` : ''}
     ${bills.length ? `<h3 class="sub-h">Bills</h3>${bills.map(row).join('')}` : ''}
+    ${m.rows.some((r) => r.plan > 0 && r.actual === 0 && !isFuture) ? `<p class="hint">Tap ✓ when a bill is paid or income arrives. To have it recorded by itself, open it in Settings and choose how often it repeats.</p>` : ''}
+  </section>`;
+}
+
+/** Year: what was left each month (income − bills − spending), the money free to save or invest. */
+function keptCard(months) {
+  const today = todayISO(), e = state.engine;
+  const done = months.filter((m) => (m.income || m.variable || m.fixed) && `${e.year}-${String(m.month).padStart(2, '0')}` < today.slice(0, 7));
+  if (!done.length) return '';
+  const kept = done.map((m) => ({ m: m.month, v: m.income - m.variable - m.fixed, cost: m.variable + m.fixed }));
+  const max = Math.max(1, ...kept.map((k) => Math.abs(k.v)));
+  const avg = kept.reduce((s, k) => s + k.v, 0) / kept.length;
+  const avgCost = kept.reduce((s, k) => s + k.cost, 0) / kept.length;
+  return `<section class="card">
+    <div class="card-h"><h2>Left each month</h2><span class="muted">avg ${usd(avg)}</span></div>
+    <div class="kept">${kept.map((k) => `<div class="kept-r"><span>${monthName(k.m).slice(0, 3)}</span>
+      <span class="kept-t"><i class="${k.v < 0 ? 'neg' : ''}" style="width:${((100 * Math.abs(k.v)) / max).toFixed(1)}%"></i></span>
+      <b class="${k.v < 0 ? 'neg' : 'pos'}">${usd(k.v)}</b></div>`).join('')}</div>
+    <p class="hint">Income minus bills and spending, for months that are over. A common approach: first keep about 3 months of costs (≈ ${usd(avgCost * 3)} for you) as an emergency fund, then move what's left each month to savings or investments. This is general information, not financial advice.</p>
+  </section>`;
+}
+
+/** Month: what's left after bills and spending, so far and (this month) expected by the last day. */
+function leftCard(mo, plan, elapsed) {
+  const isCurrent = elapsed > 0 && elapsed < mo.days;
+  const projSpend = isCurrent ? Math.max(mo.variableSpent, (mo.variableSpent / elapsed) * mo.days) : mo.variableSpent;
+  const end = {
+    income: isCurrent ? Math.max(mo.income, plan.income.plan) : mo.income,
+    bills: isCurrent ? Math.max(mo.fixed, plan.fixed.plan) : mo.fixed,
+    spend: projSpend,
+  };
+  end.left = end.income - end.bills - end.spend;
+  const col = (v) => `<b class="${v < 0 ? 'neg' : ''}">${usd(v)}</b>`;
+  const rows = [['Income', mo.income, end.income, 'inc'], ['Bills', -mo.fixed, -end.bills, ''], ['Spending', -mo.variableSpent, -end.spend, '']];
+  return `<section class="card left-card">
+    <div class="card-h"><h2>Left to save or invest</h2><span class="muted">${isCurrent ? 'This month' : monthName(mo.month)}</span></div>
+    <div class="left-grid ${isCurrent ? 'two' : ''}">
+      <span></span>${isCurrent ? '<small>So far</small><small>By month end</small>' : '<small></small>'}
+      ${rows.map(([l, a, b, cls]) => `<span>${l}</span><b class="${cls}">${a > 0 ? '+' : ''}${usd(a)}</b>${isCurrent ? `<b class="${cls} soft">${b > 0 ? '+' : ''}${usd(b)}</b>` : ''}`).join('')}
+      <span class="tot">Left</span>${col(mo.net)}${isCurrent ? col(end.left) : ''}
+    </div>
+    <p class="hint">${isCurrent
+      ? `If income and bills come in as planned and spending keeps this pace, about ${hl(usd(Math.max(0, end.left)))} will be left on ${shortDate(mo.last)}. Move it to savings or investments once the month is over and the bills are paid.`
+      : mo.net > 0 ? `${hl(usd(mo.net))} was left in ${monthName(mo.month)}: money you can move to savings or investments.` : `Nothing was left in ${monthName(mo.month)}: bills and spending were ${hl(usd(-mo.net))} more than income.`}</p>
   </section>`;
 }
 
@@ -910,12 +1031,14 @@ function insightsYear() {
   const top = e.totalsBy((t) => !isIncome(t) && Number(t.date.slice(0, 4)) === e.year).slice(0, 6);
   const topMax = top[0]?.amount || 1;
   return `
-  <div class="tiles">
+  <div class="tiles four">
     <div class="tile"><span>Income</span><b class="inc">${compact(inc)}</b></div>
-    <div class="tile"><span>Spent</span><b>${compact(out)}</b></div>
-    <div class="tile"><span>Saved</span><b class="${rate < 0 ? 'neg' : 'pos'}">${Math.round(rate * 100)}%</b></div>
+    <div class="tile"><span>Spending</span><b>${compact(months.reduce((s, m) => s + m.variable, 0))}</b></div>
+    <div class="tile"><span>Bills</span><b>${compact(months.reduce((s, m) => s + m.fixed, 0))}</b></div>
+    <div class="tile"><span>Kept</span><b class="${inc - out < 0 ? 'neg' : 'pos'}">${compact(inc - out)}</b>${inc > 0 ? `<small>${Math.round(rate * 100)}% of income</small>` : ''}</div>
   </div>
   ${guideCard(yearGuide(months, top))}
+  ${keptCard(months)}
   <section class="card">
     <div class="card-h"><h2>Cash flow</h2><span class="legend"><i style="background:var(--income)"></i>In <i style="background:var(--spend)"></i>Spending <i style="background:var(--fixed)"></i>Bills</span></div>
     ${chart.monthBars(months)}
@@ -967,14 +1090,16 @@ function enableDragToClose(wrap) {
 
 // ---- add / edit entry ----
 
-function entrySheet(tx = null) {
+/** Add or edit an entry. `preset` pre-fills a new one (e.g. a bill whose amount changes each month). */
+function entrySheet(tx = null, preset = null) {
   const cats = categories();
+  const pc = preset?.category ? catByName(preset.category) : null;
   const draft = {
     amount: tx ? String(tx.amount) : '',
-    category: tx?.category || '',
-    date: tx?.date || todayISO(),
-    note: tx?.note || '',
-    kind: tx ? kindOf(tx) : 'variable',
+    category: tx?.category || pc?.name || '',
+    date: tx?.date || preset?.date || todayISO(),
+    note: isEstimated(tx) ? '' : tx?.note || '',
+    kind: tx ? kindOf(tx) : pc ? kindOf(pc) : 'variable',
   };
   const kinds = [['variable', 'Spending'], ['fixed', 'Bills'], ['income', 'Income']];
 
@@ -984,6 +1109,7 @@ function entrySheet(tx = null) {
       <b>${tx ? 'Edit' : 'New entry'}</b>
       ${tx ? `<button class="txt-btn bad" data-act="delete">Delete</button>` : '<span style="width:56px"></span>'}
     </div>
+    ${isEstimated(tx) ? `<p class="est-note">${icon('alert', 15, 2.4)}<span>Hesab filled this in because it wasn't recorded last month. Check the amount and date, then tap <b>Confirm</b>. If it wasn't paid, delete it.</span></p>` : ''}
     <div class="amount" id="amt"><span class="cur">$</span><span id="amtV"></span><span class="caret"></span></div>
     <div class="seg small" id="kinds">${kinds.map(([k, l]) => `<button data-k="${k}">${l}</button>`).join('')}</div>
     <div class="cats" id="cats"></div>
@@ -993,7 +1119,7 @@ function entrySheet(tx = null) {
     </div>
     <div class="keypad" id="keypad">${['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'del'].map((k) =>
       `<button data-key="${k}" aria-label="${k === 'del' ? 'Delete digit' : k}">${k === 'del' ? icon('del', 24) : k}</button>`).join('')}</div>
-    <button class="primary" id="save" disabled>${tx ? 'Save changes' : 'Add'}</button>`;
+    <button class="primary" id="save" disabled>${isEstimated(tx) ? 'Confirm' : tx ? 'Save changes' : 'Add'}</button>`;
 
   openSheet(html, {
     cls: 'entry',
@@ -1098,7 +1224,7 @@ function enableReorder(list, onDone) {
 // ---- settings ----
 
 const KIND_LABEL = { variable: 'Spending', fixed: 'Bill', income: 'Income' };
-const KIND_GROUP = { variable: 'Weekly spending', fixed: 'Monthly bill', income: 'Income' };
+const KIND_GROUP = { variable: 'Weekly spending', fixed: 'Bill', income: 'Income' };
 
 function settingsSheet({ showConnect = false } = {}) {
   const e = state.engine, m = mode();
@@ -1114,19 +1240,19 @@ function settingsSheet({ showConnect = false } = {}) {
     const cell = k === 'variable'
       ? `<span class="plan-in"><span class="money-in">$<input type="number" inputmode="decimal" min="0" step="1" data-target="${esc(c.name)}" value="${e.targets[c.name] || 0}" aria-label="${esc(c.name)} weekly budget"></span><small>/wk</small></span>`
       : canEditPlans()
-        ? `<span class="plan-in"><span class="money-in">$<input type="number" inputmode="decimal" min="0" step="1" data-plan="${esc(c.name)}" data-kind="${k}" value="${e.plans[c.name] || 0}" aria-label="${esc(c.name)} monthly amount"></span><small>/mo</small></span>`
+        ? `<span class="plan-in"><span class="money-in">$<input type="number" inputmode="decimal" min="0" step="1" data-plan="${esc(c.name)}" data-kind="${k}" data-mult="${perMonth(c.name)}" value="${e.plans[c.name] || 0}" aria-label="${esc(c.name)} amount"></span><small>${unitOf(c.name)}</small></span>`
         : '';
     return `<div class="row" data-name="${esc(c.name)}">${editable ? `<span class="grip" data-grip aria-label="Drag to reorder">${icon('grip', 18)}</span>` : ''}${catIcon(c.name, 30)}
       ${editable ? `<button class="row-name" data-cat-edit="${esc(c.name)}">${esc(c.name)}</button>` : `<span>${esc(c.name)}</span>`}
       ${cell}</div>`;
   };
-  const planTotal = (k) => cats.filter((c) => kindOf(c) === k).reduce((sum, c) => sum + (e.plans[c.name] || 0), 0);
+  const planTotal = (k) => cats.filter((c) => kindOf(c) === k).reduce((sum, c) => sum + (e.plans[c.name] || 0) * perMonth(c.name), 0);
   const GROUPS = [
     { k: 'variable', title: 'Weekly spending', sub: 'Shown in the weekly report. Each one has a weekly budget; what you don\'t spend is saved, overspending carries into next week.', add: 'New spending category',
       total: `<div class="row total"><span>Weekly budget</span><b id="tTotal">${money(e.weeklyTargetTotal, { cents: false })}</b></div>` },
-    { k: 'fixed', title: 'Monthly bills', sub: 'Fixed costs like rent or phone, paid once a month. Not part of the weekly budget; Insights shows which are paid.', add: 'New bill',
+    { k: 'fixed', title: 'Bills', sub: 'Rent, phone, electricity… monthly or every few weeks, fixed or changing amounts. Not part of the weekly budget; Insights shows which are paid.', add: 'New bill',
       total: canEditPlans() ? `<div class="row total"><span>Bills per month</span><b id="tFixed">${money(planTotal('fixed'), { cents: false })}</b></div>` : '' },
-    { k: 'income', title: 'Income', sub: 'Money coming in. Insights compares it with what you expect each month.', add: 'New income',
+    { k: 'income', title: 'Income', sub: 'Salary, paychecks… monthly or every 2 weeks. Insights compares it with what you expect each month.', add: 'New income',
       total: canEditPlans() ? `<div class="row total"><span>Expected per month</span><b id="tIncome">${money(planTotal('income'), { cents: false })}</b></div>` : '' },
   ];
   const catGroups = GROUPS.map((gr) => {
@@ -1185,7 +1311,7 @@ function settingsSheet({ showConnect = false } = {}) {
       <h3 class="grp">About</h3>
       <div class="card form">
         <div class="row"><span>Budget year</span><b>${e.year}</b></div>
-        <div class="row"><span>Weeks per block</span><b>${e.weeksPerBlock}</b></div>
+        <div class="row"><span>Weeks</span><b>Mon – Sun · ${e.weeks} this year</b></div>
       </div>
       <h3 class="grp">Updates & privacy</h3>
       <div class="card form">
@@ -1261,7 +1387,7 @@ function settingsSheet({ showConnect = false } = {}) {
         const v = Math.max(0, Math.round(Number(inp.value) * 100) / 100 || 0);
         inp.value = v;
         await setPlan(inp.dataset.plan, v);
-        const sumKind = (k) => [...wrap.querySelectorAll(`[data-plan][data-kind="${k}"]`)].reduce((t, x) => t + (Number(x.value) || 0), 0);
+        const sumKind = (k) => [...wrap.querySelectorAll(`[data-plan][data-kind="${k}"]`)].reduce((t, x) => t + (Number(x.value) || 0) * (Number(x.dataset.mult) || 1), 0);
         if ($('#tFixed', wrap)) $('#tFixed', wrap).textContent = money(sumKind('fixed'), { cents: false });
         if ($('#tIncome', wrap)) $('#tIncome', wrap).textContent = money(sumKind('income'), { cents: false });
       }));
@@ -1309,6 +1435,10 @@ function settingsSheet({ showConnect = false } = {}) {
   });
 }
 
+/** Average times per month an amount happens (weekly items ≈ 4.33, every 2 weeks ≈ 2.17). */
+const perMonth = (name) => { const r = state.engine.repeats[name]; return r?.kind === 'weeks' && !r.varies ? 52 / 12 / r.every : 1; };
+const unitOf = (name) => { const r = state.engine.repeats[name]; return r?.varies ? '~/mo' : r?.kind === 'weeks' ? (r.every === 1 ? '/wk' : `/${r.every}wk`) : '/mo'; };
+
 function categorySheet(name, newKind = 'variable') {
   const c = name ? catByName(name) : null;
   const used = c ? state.snapshot.transactions.filter((t) => t.category === c.name).length : 0;
@@ -1325,8 +1455,17 @@ function categorySheet(name, newKind = 'variable') {
     </div>
     <div class="card form" id="catPlan" ${canEditPlans() ? '' : 'data-off'}>
       <label><span id="catPlanL">Monthly amount</span><span class="money-in">$<input id="catPlanV" type="number" inputmode="decimal" min="0" value="${c ? state.engine.plans[c.name] || 0 : 0}"></span></label>
+      ${canAutoAdd() ? (() => {
+        const r = c ? state.engine.repeats[c.name] : null;
+        const sel = !r || r.kind === 'none' ? 'off' : r.kind === 'month' ? 'month' : `w${r.every}`;
+        return `<label><span>Repeats</span><select id="catRep" class="select">${[['off', 'Not automatically'], ['month', 'Every month'], ['w2', 'Every 2 weeks'], ['w1', 'Every week']].map(([v, l]) => `<option value="${v}" ${v === sel ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label id="catDayRow"><span>On day</span><select id="catDay" class="select">${Array.from({ length: 28 }, (_, i) => i + 1).map((d) => `<option value="${d}" ${(r?.kind === 'month' ? r.day : 1) === d ? 'selected' : ''}>${ordinal(d)} of the month</option>`).join('')}</select></label>
+      <label id="catFromRow"><span>One pay date</span><input type="date" id="catFrom" value="${r?.kind === 'weeks' ? r.from : todayISO()}"></label>
+      <label class="toggle"><span>Amount changes each time</span><input type="checkbox" id="catVaries" ${r?.varies ? 'checked' : ''}></label>`;
+      })() : ''}
     </div>
     <p class="hint" id="catHint"></p>
+    <p class="hint" id="catVaryHint" hidden>The amount is different each time (like electricity), so Hesab won't record it by itself. On its date it shows “Enter amount” in Insights; tap ✓ and type what you paid. Leave the usual amount at 0 to use your average of the last 3 months.</p>
     ${c && used ? `<div id="moveBox" hidden>
         <h3 class="grp">Move ${used} entr${used === 1 ? 'y' : 'ies'} to</h3>
         <div class="card form"><label><span>Category</span><select id="moveTo" class="select">
@@ -1344,15 +1483,35 @@ function categorySheet(name, newKind = 'variable') {
         $('#catBudget', wrap).hidden = kind !== 'variable';
         $('#catPlan', wrap).hidden = kind === 'variable' || $('#catPlan', wrap).hasAttribute('data-off');
         $('#catPlanL', wrap).textContent = kind === 'income' ? 'Expected per month' : 'Planned per month';
+        const rv = $('#catRep', wrap)?.value || 'off';
+        if ($('#catRep', wrap)) {
+          $('#catDayRow', wrap).hidden = rv !== 'month';
+          $('#catFromRow', wrap).hidden = !rv.startsWith('w');
+        }
+        if (rv.startsWith('w')) $('#catPlanL', wrap).textContent = kind === 'income' ? 'Each payment' : 'Each time';
+        if ($('#catVaries', wrap)?.checked) $('#catPlanL', wrap).textContent = 'Usual amount';
+        if ($('#catVaryHint', wrap)) $('#catVaryHint', wrap).hidden = !$('#catVaries', wrap)?.checked;
         $('#catHint', wrap).textContent = kind === 'variable' ? 'Everyday spending with a weekly budget. Shown in the weekly report.'
-          : kind === 'fixed' ? 'Regular bills like rent or phone. Not part of the weekly budget; Insights shows if each one is paid this month.' : 'Money coming in. Insights compares it with what you expect each month.';
+          : kind === 'fixed' ? 'Regular bills like rent or phone. Not part of the weekly budget. Choose how often it repeats and it is recorded by itself on its dates, or tap ✓ in Insights when it is paid.'
+          : 'Money coming in. Choose how often it repeats (every month, every 2 weeks…) and it is recorded by itself, or tap ✓ in Insights when it arrives.';
         $('#catPrev', wrap).innerHTML = catIcon($('#catName', wrap).value || 'New', 64);
       };
       $('#catKind', wrap).addEventListener('click', (ev) => { const b = ev.target.closest('[data-k]'); if (b) { kind = b.dataset.k; paint(); } });
       $('#catName', wrap).addEventListener('input', paint);
+      $('#catRep', wrap)?.addEventListener('change', paint);
+      $('#catVaries', wrap)?.addEventListener('change', paint);
       wrap.querySelector('[data-back]').addEventListener('click', () => settingsSheet());
       $('#catSave', wrap).addEventListener('click', () => {
-        const err = saveCategory(c?.name || null, { name: $('#catName', wrap).value, kind, target: $('#catTarget', wrap).value, plan: $('#catPlanV', wrap).value });
+        const err = saveCategory(c?.name || null, { name: $('#catName', wrap).value, kind, target: $('#catTarget', wrap).value, plan: $('#catPlanV', wrap).value,
+          repeat: (() => {
+            const rv = $('#catRep', wrap)?.value || 'off', varies = !!$('#catVaries', wrap)?.checked;
+            // keep the month it first started repeating; a new repeat starts this month
+            const since = (c && state.engine.repeats[c.name]?.since) || todayISO().slice(0, 7);
+            const r = rv === 'month' ? { kind: 'month', day: Number($('#catDay', wrap).value), varies, since }
+              : rv.startsWith('w') ? { kind: 'weeks', every: Number(rv.slice(1)), from: $('#catFrom', wrap).value || todayISO(), varies }
+              : varies ? { kind: 'none', varies, since } : null;
+            return repeatValue(r);
+          })() });
         if (err) { toast(err, 'bad'); return; }
         settingsSheet();
       });
@@ -1385,7 +1544,7 @@ function welcomeView() {
     <p class="w-lead">A calm weekly budget. See what's left, spend with confidence, and watch your savings grow.</p>
     <ul class="w-points">
       <li>${icon('ring', 20)}<span><b>Weekly room to spend</b> per category, with overspending carried forward</span></li>
-      <li>${icon('chart', 20)}<span><b>Clear insights</b>: pace, calendar, 4-week blocks and yearly cash flow</span></li>
+      <li>${icon('chart', 20)}<span><b>Clear insights</b>: pace, a monthly report, what's left to save, and yearly cash flow</span></li>
       <li>${icon('shield', 20)}<span><b>Private by default</b>: your data stays on this phone</span></li>
     </ul>
     <div class="w-actions">
@@ -1412,6 +1571,20 @@ function toast(msg, tone = '') {
   toastTimer = setTimeout(() => el.classList.remove('show'), tone === 'bad' ? 4200 : 2200);
 }
 
+// ───────────────────────────────────────────── native feel
+
+// No long-press menu (copy / look up) outside text fields, and no image dragging, like a phone app.
+document.addEventListener('contextmenu', (ev) => { if (!ev.target.closest('input, textarea, select')) ev.preventDefault(); });
+document.addEventListener('dragstart', (ev) => { if (ev.target.closest('img, svg, a')) ev.preventDefault(); });
+// Double-tap zoom is off through CSS (touch-action: manipulation); iOS ignores user-scalable=no for pinch, so stop it here.
+document.addEventListener('gesturestart', (ev) => ev.preventDefault());
+// A stray selection (e.g. from a long press that started on text) is cleared on the next tap.
+document.addEventListener('touchstart', (ev) => {
+  if (ev.target.closest('input, textarea, select')) return;
+  const sel = window.getSelection?.();
+  if (sel && !sel.isCollapsed) sel.removeAllRanges();
+}, { passive: true });
+
 // ───────────────────────────────────────────── events
 
 document.addEventListener('click', (ev) => {
@@ -1420,7 +1593,11 @@ document.addEventListener('click', (ev) => {
   if (t && t.closest('.sheet') && t.dataset.act === 'edit') { const tx = state.snapshot.transactions.find((x) => x.id === t.dataset.id); if (tx) entrySheet(tx); return; }
   if (!t || t.closest('.sheet')) {
     const tab = ev.target.closest('.tab');
-    if (tab) { state.tab = tab.dataset.tab; render(); window.scrollTo({ top: 0 }); }
+    if (tab) {
+      // tapping Lists again while a list is open goes back to all lists
+      if (tab.dataset.tab === 'lists' && (state.tab !== 'lists' || lists.isOpen())) lists.close();
+      state.tab = tab.dataset.tab; render(); window.scrollTo({ top: 0 });
+    }
     const bar = ev.target.closest('#weekBars .wbar');
     if (bar) { state.week = Number(bar.dataset.week); render(); }
     const cell = ev.target.closest('.hm[data-day]');
@@ -1442,13 +1619,18 @@ document.addEventListener('click', (ev) => {
     case 'connectGoogle': if (!state.engine) setSnapshot(starterSnapshot()); googleSheetChooser(); break;
     case 'gsignin': g.signIn({ after: 'sync' }); break;
     case 'sync': refresh(); break;
-    case 'prevWeek': state.week = Math.max(1, state.week - 1); state.block = e.blockOf(state.week); render(); break;
-    case 'nextWeek': state.week = Math.min(WEEKS, state.week + 1); state.block = e.blockOf(state.week); render(); break;
-    case 'thisWeek': state.week = e.currentWeek; state.block = e.blockOf(state.week); render(); break;
-    case 'prevBlock': state.block = Math.max(1, state.block - 1); render(); break;
-    case 'nextBlock': state.block = Math.min(e.blockCount, state.block + 1); render(); break;
+    case 'prevWeek': state.week = Math.max(1, state.week - 1); render(); break;
+    case 'nextWeek': state.week = Math.min(e.weeks, state.week + 1); render(); break;
+    case 'thisWeek': state.week = e.currentWeek; render(); break;
     case 'prevMonth': state.month = Math.max(1, state.month - 1); render(); break;
     case 'nextMonth': state.month = Math.min(12, state.month + 1); render(); break;
+    case 'reviewEst': {
+      const ym = t.dataset.ym;
+      if (Number(ym.slice(0, 4)) === e.year) { state.tab = 'insights'; state.insights = 'month'; state.month = Number(ym.slice(5, 7)); render(); window.scrollTo({ top: 0 }); }
+      else entriesSheet('Filled in for you', 'Check each one', newestFirst().filter(isEstimated));
+      break;
+    }
+    case 'markPaid': markPaid(t.dataset.cat, t.dataset.ym); break;
     case 'catTx': categoryEntries(t.dataset.cat, t.dataset.from, t.dataset.to); break;
     case 'tab': state.tab = t.dataset.tab; render(); window.scrollTo({ top: 0 }); break;
     case 'filter': state.filter = t.dataset.f; render(); break;
@@ -1466,6 +1648,7 @@ document.addEventListener('input', (ev) => {
 });
 
 $('#fab').addEventListener('click', () => entrySheet());
+lists.init(() => render());
 document.addEventListener('change', async (ev) => {
   if (ev.target.id !== 'welcomeRestore') return;
   const file = ev.target.files?.[0]; if (!file) return;

@@ -35,7 +35,7 @@ export function dayTitle(iso) {
 }
 
 export function weekRange(days) {
-  const a = parseISO(days[0]), b = parseISO(days[6]);
+  const a = parseISO(days[0]), b = parseISO(days[days.length - 1]);
   const sameMonth = a.getMonth() === b.getMonth();
   return sameMonth ? `${md.format(a)} – ${b.getDate()}` : `${md.format(a)} – ${md.format(b)}`;
 }
