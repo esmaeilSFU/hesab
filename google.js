@@ -210,16 +210,20 @@ export class SheetsClient {
     const budget = v(2).map((row) => ({ category: String(row[0] ?? '').trim(), weeklyTarget: Number(row[1]) || 0, monthlyPlan: Number(row[2]) || 0 }))
       .filter((b) => b.category && b.category.toLowerCase() !== 'total');
 
-    const transactions = [];
+    const transactions = [], seen = new Set();
     v(0).forEach((row, i) => {
       const [ts, date, amount, type, expType, cat, note] = row;
       if ((ts === '' || ts == null) && (amount === '' || amount == null)) return;
       const category = String(cat ?? '').trim();
       const m = meta2[category] || {};
       const tsNum = typeof ts === 'number' ? ts : null;
+      // Two rows can share a timestamp (copied rows, form imports); the row number keeps their ids apart.
+      let id = tsNum != null ? 's' + tsNum : 'row-' + (i + 2);
+      if (seen.has(id)) id += '#' + (i + 2);
+      seen.add(id);
       transactions.push({
         row: i + 2,
-        id: tsNum != null ? 's' + tsNum : 'row-' + (i + 2),
+        id,
         timestamp: tsNum != null ? new Date(serialToMs(tsNum)).toISOString() : null,
         date: typeof date === 'number' ? serialToISO(date) : tsNum != null ? serialToISO(Math.floor(tsNum)) : todayISO(),
         amount: Number(amount) || 0,
@@ -262,14 +266,25 @@ export class SheetsClient {
       date: entry.date, amount: entry.amount, type: c[3], expenseType: c[4], category: entry.category, note: entry.note || '' };
   }
 
+  /** Finds the Ledger row that still holds an entry. Rows move when others are added or deleted, and
+   *  some rows have no timestamp, so the entry's own values (date, amount, category, note) confirm it. */
   async #resolveRow(tx) {
-    const r = await call(`${this.id}/values/${q('Ledger!A2:A')}?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=SERIAL_NUMBER`);
-    const col = (r.values || []).map((x) => x[0]);
-    const key = (v, i) => (typeof v === 'number' ? 's' + v : 'row-' + (i + 2));
-    if (tx.row >= 2 && key(col[tx.row - 2], tx.row - 2) === tx.id) return tx.row;
-    const i = col.findIndex((v, j) => key(v, j) === tx.id && tx.id.startsWith('s'));
-    if (i >= 0) return i + 2;
-    throw new ApiError('stale', 'This entry changed in the sheet. Pull to refresh and try again.');
+    const r = await call(`${this.id}/values/${q('Ledger!A2:G')}?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=SERIAL_NUMBER`);
+    const rows = r.values || [];
+    const stamp = String(tx.id).startsWith('s') ? String(tx.id).split('#')[0] : null;
+    const iso = (d) => (typeof d === 'number' ? serialToISO(Math.floor(d)) : String(d ?? ''));
+    const holds = (row) => !!row
+      && Math.abs((Number(row[2]) || 0) - tx.amount) < 0.005
+      && String(row[5] ?? '').trim() === tx.category
+      && (stamp ? typeof row[0] === 'number' && 's' + row[0] === stamp : true);
+    const exact = (row) => holds(row) && (row[1] === '' || row[1] == null || iso(row[1]) === tx.date) && String(row[6] ?? '') === String(tx.note ?? '');
+    if (tx.row >= 2 && holds(rows[tx.row - 2])) return tx.row;
+    let best = -1;
+    for (const test of [exact, holds]) {
+      rows.forEach((row, i) => { if (test(row) && (best < 0 || Math.abs(i + 2 - tx.row) < Math.abs(best - tx.row))) best = i + 2; });
+      if (best > 0) return best;
+    }
+    throw new ApiError('stale', 'This entry was changed or removed in the sheet. Pull down to refresh, then try again.');
   }
 
   async update(tx, entry) {

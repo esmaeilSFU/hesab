@@ -157,3 +157,27 @@ export function hbars(items) {
     </div>`;
   }).join('')}</div>`;
 }
+
+/** One bar per day of a calendar month, with the daily spending budget as a dashed line. */
+export function dayBars(daily, perDay, first, { w = 340, h = 150 } = {}) {
+  const pad = { l: 4, r: 30, t: 14, b: 20 };
+  const iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
+  const n = daily.length;
+  const max = Math.max(perDay, ...daily) * 1.12 || 1;
+  const slot = iw / n, bw = Math.max(2, slot * 0.64);
+  const y = (v) => pad.t + ih - (ih * v) / max;
+  const today = todayISO(), ym = first.slice(0, 7);
+  const todayN = today.slice(0, 7) === ym ? Number(today.slice(8, 10)) : 0;
+  return `<svg class="chart" viewBox="0 0 ${w} ${h}" aria-label="Spending each day of the month">
+    <line x1="${pad.l}" x2="${w - pad.r}" y1="${f(y(0))}" y2="${f(y(0))}" class="axis"/>
+    ${daily.map((v, i) => {
+      const x = pad.l + slot * i + (slot - bw) / 2, hh = v > 0 ? Math.max(2, y(0) - y(v)) : 0;
+      const d = i + 1, tone = perDay > 0 && v > perDay * 1.5 ? 'var(--bad)' : 'var(--spend)';
+      const label = d === 1 || d % 5 === 0 || d === todayN;
+      return `${hh ? `<rect x="${f(x)}" y="${f(y(0) - hh)}" width="${f(bw)}" height="${f(hh)}" rx="${f(Math.min(3, bw / 2))}" fill="${tone}" opacity="${todayN && d > todayN ? 0.3 : d === todayN ? 1 : 0.7}"><title>${d}: ${compact(v)}</title></rect>` : ''}
+        ${label ? `<text x="${f(x + bw / 2)}" y="${h - 5}" class="tick ${d === todayN ? 'strong' : ''}" text-anchor="middle">${d}</text>` : ''}`;
+    }).join('')}
+    ${perDay > 0 ? `<line x1="${pad.l}" x2="${w - pad.r + 2}" y1="${f(y(perDay))}" y2="${f(y(perDay))}" class="target"/>
+    <text x="${w - 2}" y="${f(y(perDay)) + 4}" class="tick" text-anchor="end">${compact(perDay)}</text>` : ''}
+  </svg>`;
+}

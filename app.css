@@ -461,3 +461,25 @@ body.onboarding .install-banner { display: none; }
 .sub-h { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 14px 0 2px; }
 .plan-in { display: inline-flex; align-items: baseline; gap: 4px; }
 .plan-in small { color: var(--muted); font-size: 12px; }
+
+/* ───── settings: category groups */
+.grp-sub { margin: -4px 4px 8px; }
+.cat-group { margin-bottom: 4px; }
+.add-cat { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 6px; margin-bottom: 6px; font-size: 15px; font-weight: 600; }
+.cat-group .empty.small { padding: 14px 0; font-size: 14px; color: var(--muted); }
+
+/* ---- guidance ---- */
+.guide ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.guide li { display: flex; gap: 10px; align-items: flex-start; font-size: 14.5px; line-height: 1.4; }
+.guide .g-ic { flex: none; width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; background: var(--selection); color: var(--brand-text); }
+.guide li.good .g-ic { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
+.guide li.warn .g-ic { background: color-mix(in srgb, var(--warning) 16%, transparent); color: var(--warning); }
+.guide li.bad .g-ic { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.guide li > span:last-child { padding-top: 3px; }
+
+/* tappable rows that open their entries */
+button.cl { width: 100%; text-align: left; font: inherit; color: inherit; background: none; border: 0; border-radius: 0; }
+.cl.tap { cursor: pointer; }
+.cl.tap:active { background: var(--fill); }
+.hint.center { text-align: center; }
+.seg button { white-space: nowrap; }
