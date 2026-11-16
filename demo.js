@@ -41,11 +41,11 @@ export function demoSnapshot() {
     for (const [cat, p, lo, hi] of FREQ) {
       if (r() < p) add(d, lo + r() * (hi - lo), cat, NOTES[cat][Math.floor(r() * NOTES[cat].length)]);
     }
-    if (d.endsWith('-01')) for (const [cat, amt] of BILLS) add(d, amt, cat);
+    if (d.endsWith('-01')) { for (const [cat, amt] of BILLS) add(d, amt, cat); add(d, 500, 'Investing', 'Repeating'); }
     if (dayIndex(d) % 14 === 4) add(d, 2000, 'Salary', 'Paycheck');
     if (d.endsWith('-15')) add(d, 300, 'Other Income', 'Side project');
   }
-  const plans = { ...Object.fromEntries(BILLS), 'Salary': 4000, 'Other Income': 300 };
-  const budget = [...base.budget, ...Object.entries(plans).map(([category, monthlyPlan]) => ({ category, weeklyTarget: 0, monthlyPlan }))];
+  const plans = { ...Object.fromEntries(BILLS), 'Investing': 500, 'Salary': 4000, 'Other Income': 300 };
+  const budget = [...base.budget, ...Object.entries(plans).map(([category, monthlyPlan]) => ({ category, weeklyTarget: 0, monthlyPlan, repeat: category === 'Investing' ? '1' : '' }))];
   return { ...base, budget, transactions: tx };
 }

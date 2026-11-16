@@ -132,6 +132,44 @@ export function removePerson(fileId, permissionId) {
   return drive(`files/${fileId}/permissions/${permissionId}?supportsAllDrives=true`, { method: 'DELETE' });
 }
 
+// ───────────── budgets joined on another screen
+// On iPhone an invitation link opens in Safari, not in the Home Screen app, and the two keep separate
+// storage. So a join is also written to a small file in the user's own Drive (created by Hesab, so its
+// narrow permission can read it anywhere): the Home Screen app reads it after sign-in and offers the budget.
+const JOINED_NAME = 'Hesab · shared budgets.json';
+
+async function findJoinedFile() {
+  const qs = new URLSearchParams({ q: `name='${JOINED_NAME}' and trashed=false`, fields: 'files(id)', pageSize: '1' });
+  return (await drive(`files?${qs}`)).files?.[0]?.id || null;
+}
+
+/** Budgets this Google account joined (from any device). */
+export async function readJoined() {
+  const id = await findJoinedFile();
+  if (!id) return [];
+  try {
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${id}?alt=media`, { headers: { Authorization: 'Bearer ' + token() } });
+    const j = res.ok ? await res.json() : null;
+    return Array.isArray(j?.budgets) ? j.budgets.filter((b) => b && /^[\w-]+$/.test(b.id)) : [];
+  } catch { return []; }
+}
+
+/** Remembers a joined budget in the user's Drive file. */
+export async function saveJoined(entry) {
+  const list = (await readJoined()).filter((b) => b.id !== entry.id);
+  list.unshift({ id: entry.id, name: String(entry.name || 'Shared budget').slice(0, 80), view: !!entry.view, joined: new Date().toISOString() });
+  const body = JSON.stringify({ app: 'hesab', budgets: list.slice(0, 20) });
+  const id = await findJoinedFile();
+  const t = token();
+  if (id) {
+    await fetch(`https://www.googleapis.com/upload/drive/v3/files/${id}?uploadType=media`, { method: 'PATCH', headers: { Authorization: 'Bearer ' + t, 'Content-Type': 'application/json' }, body });
+    return;
+  }
+  const boundary = 'hesab' + Date.now();
+  const multipart = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name: JOINED_NAME, mimeType: 'application/json', description: 'Budgets shared with you in Hesab. Safe to delete.' })}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${boundary}--`;
+  await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', { method: 'POST', headers: { Authorization: 'Bearer ' + t, 'Content-Type': `multipart/related; boundary=${boundary}` }, body: multipart });
+}
+
 /** The link that opens Hesab and joins this sheet. */
 export const joinLink = (fileId, role) => `${redirectURI()}?join=${encodeURIComponent(fileId)}${role === 'reader' ? '&view=1' : ''}`;
 

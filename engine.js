@@ -100,7 +100,9 @@ export function repeatDates(r, ym) {
 export const isIncome = (t) => String(t.type).toLowerCase() === 'income';
 export const isFixed = (t) => !isIncome(t) && String(t.expenseType).toLowerCase() === 'fixed';
 export const isVariable = (t) => !isIncome(t) && String(t.expenseType).toLowerCase() === 'variable';
-export const kindOf = (t) => (isIncome(t) ? 'income' : isFixed(t) ? 'fixed' : 'variable');
+/** Money set aside to invest or save (TFSA, emergency fund…): Expense Type "Invest". Not spending, not a bill. */
+export const isInvest = (t) => !isIncome(t) && String(t.expenseType).toLowerCase() === 'invest';
+export const kindOf = (t) => (isIncome(t) ? 'income' : isFixed(t) ? 'fixed' : isInvest(t) ? 'invest' : 'variable');
 
 export class Engine {
   constructor(snapshot) {
@@ -201,12 +203,13 @@ export class Engine {
     const days = new Date(this.year, m, 0).getDate();
     const first = `${ym}-01`, last = `${ym}-${pad(days)}`;
     const spent = {}, daily = new Array(days).fill(0);
-    let income = 0, fixed = 0, count = 0;
+    let income = 0, fixed = 0, invest = 0, count = 0;
     for (const t of this.transactions) {
       if (!t.date || t.date.slice(0, 7) !== ym) continue;
       count++;
       if (isIncome(t)) income += t.amount;
       else if (isFixed(t)) fixed += t.amount;
+      else if (isInvest(t)) invest += t.amount;
       else if (isVariable(t)) {
         spent[t.category] = (spent[t.category] || 0) + t.amount;
         daily[Number(t.date.slice(8, 10)) - 1] += t.amount;
@@ -215,7 +218,7 @@ export class Engine {
     const lines = this.variable.map((c) => ({ category: c, spent: spent[c.name] || 0, target: ((this.targets[c.name] || 0) * days) / 7 }));
     const variableSpent = lines.reduce((s, l) => s + l.spent, 0);
     const variableTarget = lines.reduce((s, l) => s + l.target, 0);
-    return { month: m, ym, first, last, days, daily, count, lines, income, fixed, variableSpent, variableTarget, net: income - variableSpent - fixed };
+    return { month: m, ym, first, last, days, daily, count, lines, income, fixed, invest, variableSpent, variableTarget, net: income - variableSpent - fixed - invest };
   }
   get currentMonth() {
     const t = todayISO();
@@ -235,11 +238,11 @@ export class Engine {
     return out;
   }
   monthly() {
-    const m = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, income: 0, variable: 0, fixed: 0 }));
+    const m = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, income: 0, variable: 0, fixed: 0, invest: 0 }));
     for (const t of this.transactions) {
       if (!t.date || yearOf(t.date) !== this.year) continue;
       const r = m[Number(t.date.slice(5, 7)) - 1];
-      if (isIncome(t)) r.income += t.amount; else if (isFixed(t)) r.fixed += t.amount; else r.variable += t.amount;
+      if (isIncome(t)) r.income += t.amount; else if (isFixed(t)) r.fixed += t.amount; else if (isInvest(t)) r.invest += t.amount; else r.variable += t.amount;
     }
     return m;
   }
@@ -256,10 +259,10 @@ export class Engine {
       const each = this.plans[c.name] || (repeat?.varies ? this.typical(c.name, ym) : 0);
       const dates = repeatDates(repeat, ym);
       const times = repeat?.kind === 'weeks' && this.plans[c.name] ? dates.length : 1;
-      return { category: c, kind: isIncome(c) ? 'income' : 'fixed', each, times, plan: each * times, actual: actual[c.name] || 0, repeat, dates };
+      return { category: c, kind: kindOf(c), each, times, plan: each * times, actual: actual[c.name] || 0, repeat, dates };
     }).filter((r) => r.plan || r.actual);
     const sum = (k, f) => rows.filter((r) => r.kind === k).reduce((s, r) => s + r[f], 0);
-    return { rows, income: { plan: sum('income', 'plan'), actual: sum('income', 'actual') }, fixed: { plan: sum('fixed', 'plan'), actual: sum('fixed', 'actual') } };
+    return { rows, income: { plan: sum('income', 'plan'), actual: sum('income', 'actual') }, fixed: { plan: sum('fixed', 'plan'), actual: sum('fixed', 'actual') }, invest: { plan: sum('invest', 'plan'), actual: sum('invest', 'actual') } };
   }
   /** Average monthly total of a category over the 3 months before 'YYYY-MM' that had entries. */
   typical(category, ym) {

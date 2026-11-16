@@ -53,7 +53,7 @@ const STYLE = {
   'ETC': ['dots', '#7A736C'], 'Other': ['dots', '#7A736C'],
 };
 const KEYWORDS = [
-  [/income|salary|paycheck|wage|bonus|refund/i, 'income', '#28745B'], [/rent|mortgage|house/i, 'house', '#6A5A9E'],
+  [/invest|tfsa|rrsp|fhsa|resp|saving|emergency|stock|etf|retire/i, 'chart', '#1F6B55'], [/income|salary|paycheck|wage|bonus|refund/i, 'income', '#28745B'], [/rent|mortgage|house/i, 'house', '#6A5A9E'],
   [/car|auto|vehicle/i, 'car', '#3F6A96'], [/insur/i, 'shield', '#3E7884'], [/phone|mobile/i, 'phone', '#6A6578'],
   [/internet|wifi/i, 'wifi', '#3A7699'], [/electric|hydro|utilit|power|water/i, 'bolt', '#9A6A14'],
   [/subscri|member|netflix|spotify|gym/i, 'star', '#86578F'], [/grocer|market|supermarket/i, 'cart', '#3F7A4E'],

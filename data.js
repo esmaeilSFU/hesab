@@ -8,6 +8,7 @@ export function starterSnapshot() {
     ['Rent', 'Expense', 'Fixed'], ['Car Payment', 'Expense', 'Fixed'], ['Insurance', 'Expense', 'Fixed'],
     ['Phone', 'Expense', 'Fixed'], ['Internet', 'Expense', 'Fixed'], ['Utilities', 'Expense', 'Fixed'],
     ['Subscriptions', 'Expense', 'Fixed'],
+    ['Investing', 'Expense', 'Invest'],
     ['Grocery', 'Expense', 'Variable'], ['Gas', 'Expense', 'Variable'], ['Food & Cafe', 'Expense', 'Variable'],
     ['Personal', 'Expense', 'Variable'], ['Entertainment', 'Expense', 'Variable'], ['Gifts', 'Expense', 'Variable'],
     ['Transportation', 'Expense', 'Variable'], ['Home & Household', 'Expense', 'Variable'], ['Other', 'Expense', 'Variable'],

@@ -584,3 +584,18 @@ body.view-only .fab { display: none; }
 .p-t { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .p-t b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .p-t small { color: var(--text-secondary); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---- invest ---- */
+.plan-tiles.three { grid-template-columns: repeat(3, 1fr); }
+.left-grid b.invest { color: var(--success); }
+.left-grid span em { font-style: normal; font-size: 12px; color: var(--text-secondary); margin-left: 4px; }
+.left-grid .sub { font-weight: 600; border-top: 1px dashed var(--border); padding-top: 6px; }
+.left-grid .sub ~ b.subv { border-top: 1px dashed var(--border); padding-top: 6px; font-weight: 700; color: var(--text-primary); }
+.left-grid .sub ~ b.subv.soft { color: var(--text-secondary); }
+.invest-offer { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 12px; border-radius: 14px; background: color-mix(in srgb, var(--success) 10%, transparent); }
+.invest-offer > span { color: var(--success); flex: none; }
+.invest-offer p { margin: 0; flex: 1; font-size: 14px; line-height: 1.4; }
+.invest-offer .primary.small { flex: none; width: auto; height: 38px; padding: 0 14px; font-size: 14px; background: var(--success); }
+.kept-r b small { display: block; font-size: 11px; font-weight: 500; color: var(--success); }
+.share-row .primary.small { width: auto; flex: none; height: 46px; padding: 0 20px; margin: 0; }
+.share-row .share-url { flex: 1; min-width: 0; }

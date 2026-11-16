@@ -1,4 +1,4 @@
-import { Engine, todayISO, kindOf, isIncome, isVariable, isFixed, parseRepeat, repeatValue, repeatLabel, repeatDates, ordinal, addDays, ESTIMATED, isEstimated } from './engine.js';
+import { Engine, todayISO, kindOf, isIncome, isVariable, isFixed, isInvest, parseRepeat, repeatValue, repeatLabel, repeatDates, ordinal, addDays, ESTIMATED, isEstimated } from './engine.js';
 import { Api } from './api.js';
 import { demoSnapshot } from './demo.js';
 import { starterSnapshot, loadLocal, saveLocal, clearLocal, newId, toCSV, importCSV, toBackup, fromBackup, saveFile } from './data.js';
@@ -170,7 +170,7 @@ async function refresh({ quiet = false } = {}) {
     state.syncing = false;
     render();
   }
-  if (ok && isGoogle()) { autoAdd(); wireLists(); }
+  if (ok && isGoogle()) { autoAdd(); wireLists(); offerJoined(); }
 }
 
 async function mutate(optimistic, op, successMsg) {
@@ -338,7 +338,7 @@ function saveCategory(oldName, { name, kind, target, plan, repeat = '' }) {
   const spendingAfter = s.categories.filter((c) => c.name !== oldName && isVariable(c)).length + (kind === 'variable' ? 1 : 0);
   if (isGoogle() && spendingAfter > MAX_SPENDING_CATS) return `Your sheet's reports hold up to ${MAX_SPENDING_CATS} spending categories.`;
   const type = kind === 'income' ? 'Income' : 'Expense';
-  const expenseType = kind === 'income' ? '' : kind === 'fixed' ? 'Fixed' : 'Variable';
+  const expenseType = kind === 'income' ? '' : kind === 'fixed' ? 'Fixed' : kind === 'invest' ? 'Invest' : 'Variable';
   let cat = s.categories.find((c) => c.name === oldName);
   if (!cat) { cat = { order: Math.max(0, ...s.categories.map((c) => c.order)) + 1 }; s.categories.push(cat); }
   Object.assign(cat, { name, type, expenseType });
@@ -426,8 +426,8 @@ function existingSheetChooser() {
     <div class="sheet-scroll">
       <h3 class="grp">Sheets Hesab can open</h3>
       <div class="card src-list" id="gList"><p class="empty">Looking in your Drive…</p></div>
-      <h3 class="grp">Paste a sheet link</h3>
-      <div class="share-row"><input class="share-url" id="gLink" type="url" inputmode="url" placeholder="https://docs.google.com/spreadsheets/d/…" aria-label="Google Sheet link"><button class="ghost" id="gOpen">Open</button></div>
+      <h3 class="grp">Paste a sheet or invitation link</h3>
+      <div class="share-row"><input class="share-url" id="gLink" type="url" inputmode="url" placeholder="Sheet link, or the link from an invitation email" aria-label="Google Sheet or invitation link"><button class="ghost" id="gOpen">Open</button></div>
       ${canBrowse
         ? '<button class="ghost" id="gBrowse">Browse Google Drive</button>'
         : `${g.canOpenSharedSheets() ? '' : '<button class="ghost" id="gShared">Open a sheet someone shared with me</button>'}<p class="hint">Don’t see your sheet? Tap above and paste its link, or on a computer open <b>${esc(location.host + location.pathname)}</b>, sign in with the same Google account and choose it under <b>Use a sheet I already have → Browse Google Drive</b>. It will then appear in this list on your phone. (iPhone Safari blocks Google’s file browser.)</p>`}
@@ -436,7 +436,11 @@ function existingSheetChooser() {
     async onMount(wrap) {
       $('#gBack', wrap).addEventListener('click', () => googleSheetChooser());
       $('#gOpen', wrap).addEventListener('click', () => {
-        const id = g.sheetIdFromLink($('#gLink', wrap).value);
+        const raw = $('#gLink', wrap).value.trim();
+        // An invitation link (…?join=ID) pasted into the installed app: join that budget.
+        const join = (raw.match(/[?&]join=([a-zA-Z0-9_-]+)/) || [])[1];
+        if (join) { store.set(JOIN_KEY, JSON.stringify({ id: join, view: /[?&]view=1/.test(raw) })); joinSheet(); return; }
+        const id = g.sheetIdFromLink(raw);
         if (!id) { toast('That doesn’t look like a Google Sheets link.', 'bad'); return; }
         connectTo({ id, name: 'Google Sheet' }, { fromLink: true });
       });
@@ -446,11 +450,19 @@ function existingSheetChooser() {
       });
       const list = $('#gList', wrap);
       try {
-        const files = await g.listAppSheets();
+        const [own, joined] = await Promise.all([g.listAppSheets(), g.readJoined().catch(() => [])]);
+        const files = [...joined.filter((b) => !own.some((f) => f.id === b.id)).map((b) => ({ id: b.id, name: b.name, shared: true, view: b.view })), ...own];
         list.innerHTML = files.length
-          ? files.map((f) => `<button class="src" data-id="${esc(f.id)}" data-name="${esc(f.name)}"><span class="src-ic">${icon('list', 20)}</span><span class="src-t"><b>${esc(f.name)}</b><small>Edited ${esc(shortDate(f.modified.slice(0, 10)))}</small></span>${icon('right', 16)}</button>`).join('')
+          ? files.map((f) => `<button class="src" data-id="${esc(f.id)}" data-name="${esc(f.name)}" ${f.shared ? `data-shared="1" data-view="${f.view ? 1 : ''}"` : ''}><span class="src-ic">${icon(f.shared ? 'user' : 'list', 20)}</span><span class="src-t"><b>${esc(f.name)}</b><small>${f.shared ? `Shared with you${f.view ? ' · view only' : ''}` : `Edited ${esc(shortDate(f.modified.slice(0, 10)))}`}</small></span>${icon('right', 16)}</button>`).join('')
           : '<p class="empty">No sheets yet. Create one, paste a link, or choose one in Google Drive.</p>';
-        list.querySelectorAll('.src').forEach((b) => b.addEventListener('click', () => connectTo({ id: b.dataset.id, name: b.dataset.name })));
+        list.querySelectorAll('.src').forEach((b) => b.addEventListener('click', () => {
+          if (b.dataset.shared) {
+            store.set(JOIN_KEY, JSON.stringify({ id: b.dataset.id, view: !!b.dataset.view }));
+            if (g.canOpenSharedSheets()) finishJoin(); else joinSheet();
+            return;
+          }
+          connectTo({ id: b.dataset.id, name: b.dataset.name });
+        }));
       } catch (e) {
         list.innerHTML = `<p class="empty">${esc(e.message)}</p>`;
       }
@@ -548,11 +560,67 @@ function joinSheet() {
   });
 }
 
+/** Home Screen app: a budget joined in Safari shows up here once, as an offer to switch to it. */
+let joinedChecked = false;
+async function offerJoined() {
+  if (joinedChecked || document.querySelector('.sheet-wrap')) return;
+  joinedChecked = true;
+  const seen = (() => { try { return JSON.parse(store.get('hesab.joinedSeen')) || []; } catch { return []; } })();
+  const list = await g.readJoined().catch(() => []);
+  const cur = g.chosenSheet()?.id;
+  const b = list.find((x) => x.id !== cur && !seen.includes(x.id));
+  if (!b) return;
+  store.set('hesab.joinedSeen', JSON.stringify([...seen, b.id].slice(-20)));
+  openSheet(`
+    <div class="sheet-h"><span style="width:56px"></span><b>Shared budget</b><button class="txt-btn" data-close>Not now</button></div>
+    <div class="install-hero"><span class="g-badge">${icon('user', 30)}</span>
+      <p>You joined <b>${esc(b.name)}</b>${b.view ? ' (view only)' : ''}. Use it on this phone?</p></div>
+    <button class="primary" id="jSwitch">Switch to ${esc(b.name)}</button>
+    <p class="hint center">You can switch back any time in Settings → Use a different sheet.</p>`, {
+    onMount(wrap) {
+      $('#jSwitch', wrap).addEventListener('click', () => {
+        store.set(JOIN_KEY, JSON.stringify({ id: b.id, view: !!b.view }));
+        if (g.canOpenSharedSheets()) finishJoin(); else joinSheet();
+      });
+    },
+  });
+}
+
+/** For an app already on the Home Screen: invitation links open in Safari, so paste the link here instead. */
+function joinPaste() {
+  openSheet(`
+    <div class="sheet-h"><button class="txt-btn" data-back>Back</button><b>Join a shared budget</b><span style="width:56px"></span></div>
+    <p class="hint">Open the invitation email from Google, press and hold the Hesab link in it, tap <b>Copy Link</b>, then paste it here.</p>
+    <div class="share-row"><input class="share-url" id="jLink" type="url" inputmode="url" placeholder="https://…?join=…" aria-label="Invitation link"><button class="primary small" id="jPaste">Join</button></div>
+    <p class="hint">Your entries on this phone stay here; the app switches to the shared budget.</p>`, {
+    onMount(wrap) {
+      wrap.querySelector('[data-back]').addEventListener('click', () => settingsSheet());
+      $('#jPaste', wrap).addEventListener('click', () => {
+        const raw = $('#jLink', wrap).value.trim();
+        const join = (raw.match(/[?&]join=([a-zA-Z0-9_-]+)/) || [])[1];
+        const id = join || g.sheetIdFromLink(raw);
+        if (!id) { toast('Paste the link from the invitation email.', 'bad'); return; }
+        store.set(JOIN_KEY, JSON.stringify({ id, view: /[?&]view=1/.test(raw) }));
+        joinSheet();
+      });
+    },
+  });
+}
+
 async function finishJoin() {
   const j = pendingJoin(); if (!j) return;
   store.set(VIEW_KEY(j.id), j.view ? '1' : null);
   const ok = await connectTo({ id: j.id, name: 'Shared budget' }, { join: true });
-  if (ok) { store.set(JOIN_KEY, null); track.event('joined', mode()); }
+  if (ok) {
+    store.set(JOIN_KEY, null); track.event('joined', mode());
+    g.saveJoined({ id: j.id, name: state.snapshot?.sheet?.title || 'Shared budget', view: j.view }).catch(() => {});
+    if (install.isStandalone()) return;
+    // Opened in Safari from the email: tell them the Home Screen app will pick it up.
+    setTimeout(() => openSheet(`
+      <div class="sheet-h"><span style="width:56px"></span><b>You're in</b><button class="txt-btn" data-close>Done</button></div>
+      <div class="install-hero"><span class="g-badge">${icon('check', 30)}</span>
+        <p>You joined <b>${esc(state.snapshot?.sheet?.title || 'the shared budget')}</b>. Already have Hesab on your Home Screen? Open it there: it will offer this budget after you sign in with Google.</p></div>`), 600);
+  }
 }
 
 function googleSheetChooser() {
@@ -770,7 +838,7 @@ const countLabel = (n) => `${n} transaction${n === 1 ? '' : 's'}`;
 
 function activityView() {
   const { items, groups } = activityData();
-  const chips = [['all', 'All'], ['variable', 'Spending'], ['fixed', 'Bills'], ['income', 'Income']];
+  const chips = [['all', 'All'], ['variable', 'Spending'], ['fixed', 'Bills'], ...(categories().some(isInvest) ? [['invest', 'Invest']] : []), ['income', 'Income']];
   return `
   ${header('Activity', `<span id="actCount">${countLabel(items.length)}</span>`)}
   <div class="search">${icon('search', 18)}<input id="search" type="search" placeholder="Search notes, categories, amounts" value="${esc(state.search)}" autocomplete="off"></div>
@@ -935,6 +1003,14 @@ function monthGuide(m) {
   if (mo.first > today) return [{ tone: 'info', text: `${monthName(m)} hasn't started yet. Set monthly amounts for bills and income in Settings so this report can track them.` }];
   if (!mo.count) return [{ tone: 'info', text: `Nothing was logged in ${monthName(m)}.` }];
   const tips = [];
+  const planM = e.monthVsPlan(mo.ym);
+  if (today <= mo.last && planM.invest.plan > 0 && planM.income.plan > 0) {
+    const forSpend = Math.max(mo.income, planM.income.plan) - Math.max(mo.fixed, planM.fixed.plan) - Math.max(mo.invest, planM.invest.plan);
+    if (mo.variableTarget > forSpend + 5) {
+      const perWeek = (mo.variableTarget - forSpend) / (mo.days / 7);
+      tips.push({ tone: 'bad', text: `To invest ${hl(usd(planM.invest.plan))} this month, everyday spending can be about ${usd(Math.max(0, forSpend))}, but your weekly budgets add up to ${usd(mo.variableTarget)}. Lower them by about ${hl(usd(perWeek))} a week in Settings.` });
+    }
+  }
   const est = state.snapshot.transactions.filter((t) => isEstimated(t) && t.date.slice(0, 7) === mo.ym);
   if (est.length) tips.push({ tone: 'bad', text: `${hl(`${est.length} ${est.length === 1 ? 'entry' : 'entries'}`)} for ${monthName(m)} ${est.length === 1 ? 'was' : 'were'} filled in for you because nothing was recorded (${[...new Set(est.map((t) => esc(t.category)))].join(', ')}). Tap the ⚠ in Bills & income to confirm or fix ${est.length === 1 ? 'it' : 'them'}.` });
   const isCurrent = today <= mo.last;
@@ -1054,6 +1130,10 @@ function planCard(ym) {
       if (!isFuture) return { t: 'Enter amount', c: 'est', ic: 'alert' };
     }
     if (n && !r.repeat?.varies) return { t: r.actual === 0 ? `Auto on ${shortDate(n)}` : `Next on ${shortDate(n)}`, c: 'muted', ic: 'sync' };
+    if (r.kind === 'invest') {
+      if (r.actual >= r.plan - 0.5) return { t: r.actual > r.plan + 0.5 ? `Set aside +${money(r.actual - r.plan, { cents: false })}` : 'Set aside', c: 'pos', ic: 'check' };
+      return r.actual > 0 ? { t: `${money(r.plan - r.actual, { cents: false })} to go`, c: 'muted', ic: '' } : { t: 'To set aside', c: 'muted', ic: '' };
+    }
     if (r.kind === 'income') {
       if (r.actual >= r.plan) return { t: 'Received', c: 'pos', ic: 'check' };
       return r.actual > 0 ? { t: `${money(r.plan - r.actual, { cents: false })} to come`, c: 'muted', ic: '' } : { t: 'Expected', c: 'muted', ic: '' };
@@ -1065,7 +1145,7 @@ function planCard(ym) {
   const row = (r) => {
     const st = status(r);
     const pct = r.plan ? Math.min(100, (100 * r.actual) / r.plan) : 0;
-    const col = r.kind === 'income' ? 'var(--income)' : r.actual > r.plan * 1.02 && r.plan ? 'var(--bad)' : 'var(--spend)';
+    const col = r.kind === 'income' ? 'var(--income)' : r.kind === 'invest' ? 'var(--success)' : r.actual > r.plan * 1.02 && r.plan ? 'var(--bad)' : 'var(--spend)';
     const [y, mo] = ym.split('-').map(Number);
     const range = [`${ym}-01`, `${ym}-${String(new Date(y, mo, 0).getDate()).padStart(2, '0')}`];
     const done = r.repeat?.varies ? r.actual > 0 : r.repeat?.kind === 'weeks' ? r.actual >= r.plan - 0.5 : r.actual > 0 && (r.kind === 'fixed' || r.actual >= r.plan);
@@ -1074,22 +1154,24 @@ function planCard(ym) {
       ? `<button class="tick est" data-act="catTx" data-cat="${esc(r.category.name)}" data-from="${range[0]}" data-to="${range[1]}" aria-label="Check ${esc(r.category.name)}">${icon('alert', 16, 2.6)}</button>`
       : done
       ? `<span class="tick on" aria-label="Done">${icon('check', 16, 2.8)}</span>`
-      : canTick ? `<button class="tick" data-act="markPaid" data-cat="${esc(r.category.name)}" data-ym="${ym}" aria-label="Mark ${esc(r.category.name)} as ${r.kind === 'income' ? 'received' : 'paid'}">${icon('check', 16, 2.8)}</button>` : '';
+      : canTick ? `<button class="tick" data-act="markPaid" data-cat="${esc(r.category.name)}" data-ym="${ym}" aria-label="Mark ${esc(r.category.name)} as ${r.kind === 'income' ? 'received' : r.kind === 'invest' ? 'set aside' : 'paid'}">${icon('check', 16, 2.8)}</button>` : '';
     return `<div class="plan-row"><button class="cl tap" data-act="catTx" data-cat="${esc(r.category.name)}" data-from="${range[0]}" data-to="${range[1]}">${catIcon(r.category.name, 36)}<div class="cl-main">
       <div class="cl-top"><span class="cl-n">${esc(r.category.name)}</span><span class="cl-r ${st.c}">${st.ic ? icon(st.ic, 13, 2.6) + ' ' : ''}${esc(st.t)}</span></div>
       <div class="bar"><i style="width:${pct.toFixed(1)}%;background:${col}"></i></div>
       <div class="cl-sub">${money(r.actual, { cents: false })} of ${r.repeat?.varies ? '~' : ''}${money(r.plan, { cents: false })}${r.repeat?.varies ? ' est.' : ''}${r.repeat?.kind === 'weeks' && !r.repeat.varies ? ` · ${r.times} × ${money(r.each, { cents: false })}` : ''}${r.repeat && r.repeat.kind !== 'none' ? ` · ${esc(repeatLabel(r.repeat).replace(/^Every month on/, 'monthly,'))}` : ''}</div></div></button>${tick}</div>`;
   };
-  const inc = m.rows.filter((r) => r.kind === 'income'), bills = m.rows.filter((r) => r.kind === 'fixed');
+  const inc = m.rows.filter((r) => r.kind === 'income'), bills = m.rows.filter((r) => r.kind === 'fixed'), inv = m.rows.filter((r) => r.kind === 'invest');
   return `<section class="card list">
-    <div class="card-h"><h2>Bills & income</h2><span class="muted">${esc(label)}</span></div>
-    <div class="tiles plan-tiles">
+    <div class="card-h"><h2>${inv.length ? 'Income, bills & invest' : 'Bills & income'}</h2><span class="muted">${esc(label)}</span></div>
+    <div class="tiles plan-tiles${inv.length ? ' three' : ''}">
       <div class="tile"><span>Income</span><b class="inc">${compact(m.income.actual)}</b><small>of ${compact(m.income.plan)} planned</small></div>
       <div class="tile"><span>Bills paid</span><b>${compact(m.fixed.actual)}</b><small>of ${compact(m.fixed.plan)} planned</small></div>
+      ${inv.length ? `<div class="tile"><span>Invested</span><b class="pos">${compact(m.invest.actual)}</b><small>of ${compact(m.invest.plan)} planned</small></div>` : ''}
     </div>
     ${inc.length ? `<h3 class="sub-h">Income</h3>${inc.map(row).join('')}` : ''}
     ${bills.length ? `<h3 class="sub-h">Bills</h3>${bills.map(row).join('')}` : ''}
-    ${m.rows.some((r) => r.plan > 0 && r.actual === 0 && !isFuture) ? `<p class="hint">Tap ✓ when a bill is paid or income arrives. To have it recorded by itself, open it in Settings and choose how often it repeats.</p>` : ''}
+    ${inv.length ? `<h3 class="sub-h">Invest · set aside first</h3>${inv.map(row).join('')}` : ''}
+    ${m.rows.some((r) => r.plan > 0 && r.actual === 0 && !isFuture) ? `<p class="hint">Tap ✓ when a bill is paid, income arrives or money is set aside. To have it recorded by itself, open it in Settings and choose how often it repeats.</p>` : ''}
   </section>`;
 }
 
@@ -1098,7 +1180,7 @@ function keptCard(months) {
   const today = todayISO(), e = state.engine;
   const done = months.filter((m) => (m.income || m.variable || m.fixed) && `${e.year}-${String(m.month).padStart(2, '0')}` < today.slice(0, 7));
   if (!done.length) return '';
-  const kept = done.map((m) => ({ m: m.month, v: m.income - m.variable - m.fixed, cost: m.variable + m.fixed }));
+  const kept = done.map((m) => ({ m: m.month, v: m.income - m.variable - m.fixed - m.invest, inv: m.invest, cost: m.variable + m.fixed }));
   const max = Math.max(1, ...kept.map((k) => Math.abs(k.v)));
   const avg = kept.reduce((s, k) => s + k.v, 0) / kept.length;
   const avgCost = kept.reduce((s, k) => s + k.cost, 0) / kept.length;
@@ -1106,33 +1188,59 @@ function keptCard(months) {
     <div class="card-h"><h2>Left each month</h2><span class="muted">avg ${usd(avg)}</span></div>
     <div class="kept">${kept.map((k) => `<div class="kept-r"><span>${monthName(k.m).slice(0, 3)}</span>
       <span class="kept-t"><i class="${k.v < 0 ? 'neg' : ''}" style="width:${((100 * Math.abs(k.v)) / max).toFixed(1)}%"></i></span>
-      <b class="${k.v < 0 ? 'neg' : 'pos'}">${usd(k.v)}</b></div>`).join('')}</div>
-    <p class="hint">Income minus bills and spending, for months that are over. A common approach: first keep about 3 months of costs (≈ ${usd(avgCost * 3)} for you) as an emergency fund, then move what's left each month to savings or investments. This is general information, not financial advice.</p>
+      <b class="${k.v < 0 ? 'neg' : 'pos'}">${usd(k.v)}${k.inv ? `<small>+${usd(k.inv)} invested</small>` : ''}</b></div>`).join('')}</div>
+    <p class="hint">Income minus bills, spending and what you invested, for months that are over. A common approach: first keep about 3 months of costs (≈ ${usd(avgCost * 3)} for you) as an emergency fund, then move what's left each month to savings or investments. This is general information, not financial advice.</p>
   </section>`;
 }
 
-/** Month: what's left after bills and spending, so far and (this month) expected by the last day. */
+/** Month: income, then bills and money set aside to invest come off first ("pay yourself first"),
+ *  what remains is for everyday spending, and what's left after spending is shown last. */
 function leftCard(mo, plan, elapsed) {
+  const e = state.engine, today = todayISO();
   const isCurrent = elapsed > 0 && elapsed < mo.days;
   const projSpend = isCurrent ? Math.max(mo.variableSpent, (mo.variableSpent / elapsed) * mo.days) : mo.variableSpent;
-  const end = {
-    income: isCurrent ? Math.max(mo.income, plan.income.plan) : mo.income,
-    bills: isCurrent ? Math.max(mo.fixed, plan.fixed.plan) : mo.fixed,
-    spend: projSpend,
-  };
-  end.left = end.income - end.bills - end.spend;
-  const col = (v) => `<b class="${v < 0 ? 'neg' : ''}">${usd(v)}</b>`;
-  const rows = [['Income', mo.income, end.income, 'inc'], ['Bills', -mo.fixed, -end.bills, ''], ['Spending', -mo.variableSpent, -end.spend, '']];
+  const hasInvest = plan.invest.plan > 0 || mo.invest > 0 || categories().some(isInvest);
+  const now = { income: mo.income, bills: mo.fixed, invest: mo.invest, spend: mo.variableSpent };
+  const end = isCurrent
+    ? { income: Math.max(mo.income, plan.income.plan), bills: Math.max(mo.fixed, plan.fixed.plan), invest: Math.max(mo.invest, plan.invest.plan), spend: projSpend }
+    : now;
+  const forSpend = (x) => x.income - x.bills - x.invest;
+  const left = (x) => forSpend(x) - x.spend;
+  const v = (n, cls = '') => `<b class="${cls}${n < 0 && cls.startsWith('subv') ? ' neg' : ''}">${n > 0 && cls === 'inc' ? '+' : ''}${usd(n)}</b>`;
+  const line = (label, a, b, cls = '', extra = '') => `<span class="${extra}">${label}</span>${v(a, cls)}${isCurrent ? v(b, cls + ' soft') : ''}`;
+
+  // Spent less than the weekly budgets? Offer to invest part of it, once the month is (nearly) over.
+  const prev = new Date(Number(today.slice(0, 4)), Number(today.slice(5, 7)) - 2, 15);
+  const prevYm = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`;
+  const offerable = mo.ym === prevYm || (isCurrent && mo.days - elapsed <= 2) || (mo.ym === today.slice(0, 7) && !isCurrent);
+  const under = mo.variableTarget - mo.variableSpent;
+  const extraDone = Math.max(0, mo.invest - plan.invest.plan);
+  const extra = Math.floor(Math.min(left(now), under - extraDone) / 10) * 10;
+  const investCat = categories().find(isInvest);
+  const offer = offerable && hasInvest && extra >= 20 && !isViewOnly()
+    ? `<div class="invest-offer"><span>${icon('sparkle', 18)}</span><p>You spent ${hl(usd(under))} less than your weekly budgets in ${monthName(mo.month)}. Invest some of it?</p>
+       <button class="primary small" data-act="investExtra" data-amt="${extra}" data-ym="${mo.ym}">Invest ${usd(extra)}</button></div>`
+    : '';
+
   return `<section class="card left-card">
-    <div class="card-h"><h2>Left to save or invest</h2><span class="muted">${isCurrent ? 'This month' : monthName(mo.month)}</span></div>
+    <div class="card-h"><h2>${hasInvest ? (isCurrent || mo.ym === todayISO().slice(0, 7) ? 'Your money this month' : 'Your money') : 'Left to save or invest'}</h2><span class="muted">${isCurrent ? 'This month' : monthName(mo.month)}</span></div>
     <div class="left-grid ${isCurrent ? 'two' : ''}">
       <span></span>${isCurrent ? '<small>So far</small><small>By month end</small>' : '<small></small>'}
-      ${rows.map(([l, a, b, cls]) => `<span>${l}</span><b class="${cls}">${a > 0 ? '+' : ''}${usd(a)}</b>${isCurrent ? `<b class="${cls} soft">${b > 0 ? '+' : ''}${usd(b)}</b>` : ''}`).join('')}
-      <span class="tot">Left</span>${col(mo.net)}${isCurrent ? col(end.left) : ''}
+      ${line('Income', now.income, end.income, 'inc')}
+      ${line('Bills', -now.bills, -end.bills)}
+      ${hasInvest ? line(`Invest <em>set aside first</em>`, -now.invest, -end.invest, 'invest') : ''}
+      ${hasInvest ? `<span class="sub">For spending</span>${v(forSpend(now), 'subv')}${isCurrent ? v(forSpend(end), 'subv soft') : ''}` : ''}
+      ${line('Spending', -now.spend, -end.spend)}
+      <span class="tot">Left</span><b class="${left(now) < 0 ? 'neg' : ''}">${usd(left(now))}</b>${isCurrent ? `<b class="${left(end) < 0 ? 'neg' : ''}">${usd(left(end))}</b>` : ''}
     </div>
+    ${offer}
     <p class="hint">${isCurrent
-      ? `If income and bills come in as planned and spending keeps this pace, about ${hl(usd(Math.max(0, end.left)))} will be left on ${shortDate(mo.last)}. Move it to savings or investments once the month is over and the bills are paid.`
-      : mo.net > 0 ? `${hl(usd(mo.net))} was left in ${monthName(mo.month)}: money you can move to savings or investments.` : `Nothing was left in ${monthName(mo.month)}: bills and spending were ${hl(usd(-mo.net))} more than income.`}</p>
+      ? hasInvest
+        ? `After bills and ${hl(usd(end.invest))} set aside to invest, ${hl(usd(forSpend(end)))} is for spending this month. ${left(end) >= 0 ? `At this pace about ${hl(usd(left(end)))} will still be left on ${shortDate(mo.last)}.` : `At this pace spending would go ${hl(usd(-left(end)))} past that by ${shortDate(mo.last)}.`}`
+        : `If income and bills come in as planned and spending keeps this pace, about ${hl(usd(Math.max(0, left(end))))} will be left on ${shortDate(mo.last)}. Add an Invest category in Settings to set money aside at the start of each month.`
+      : hasInvest
+        ? `${hl(usd(mo.invest))} went to investing in ${monthName(mo.month)}${left(now) > 0 ? `, and ${hl(usd(left(now)))} more was left over` : left(now) < 0 ? `, but spending went ${hl(usd(-left(now)))} past what was left for it` : ''}.`
+        : left(now) > 0 ? `${hl(usd(left(now)))} was left in ${monthName(mo.month)}: money you can move to savings or investments.` : `Nothing was left in ${monthName(mo.month)}: bills and spending were ${hl(usd(-left(now)))} more than income.`}</p>
   </section>`;
 }
 
@@ -1140,15 +1248,16 @@ function insightsYear() {
   const e = state.engine;
   const months = e.monthly();
   const inc = months.reduce((s, m) => s + m.income, 0);
-  const out = months.reduce((s, m) => s + m.variable + m.fixed, 0);
+  const invested = months.reduce((s, m) => s + m.invest, 0);
+  const out = months.reduce((s, m) => s + m.variable + m.fixed + m.invest, 0);
   const rate = inc > 0 ? (inc - out) / inc : 0;
   const top = e.totalsBy((t) => !isIncome(t) && Number(t.date.slice(0, 4)) === e.year).slice(0, 6);
   const topMax = top[0]?.amount || 1;
   return `
   <div class="tiles four">
     <div class="tile"><span>Income</span><b class="inc">${compact(inc)}</b></div>
-    <div class="tile"><span>Spending</span><b>${compact(months.reduce((s, m) => s + m.variable, 0))}</b></div>
-    <div class="tile"><span>Bills</span><b>${compact(months.reduce((s, m) => s + m.fixed, 0))}</b></div>
+    <div class="tile"><span>Spent</span><b>${compact(months.reduce((s, m) => s + m.variable + m.fixed, 0))}</b><small>spending + bills</small></div>
+    <div class="tile"><span>Invested</span><b class="pos">${compact(invested)}</b></div>
     <div class="tile"><span>Kept</span><b class="${inc - out < 0 ? 'neg' : 'pos'}">${compact(inc - out)}</b>${inc > 0 ? `<small>${Math.round(rate * 100)}% of income</small>` : ''}</div>
   </div>
   ${guideCard(yearGuide(months, top))}
@@ -1210,13 +1319,13 @@ function entrySheet(tx = null, preset = null) {
   const cats = categories();
   const pc = preset?.category ? catByName(preset.category) : null;
   const draft = {
-    amount: tx ? String(tx.amount) : '',
+    amount: tx ? String(tx.amount) : preset?.amount ? String(preset.amount) : '',
     category: tx?.category || pc?.name || '',
     date: tx?.date || preset?.date || todayISO(),
-    note: isEstimated(tx) ? '' : tx?.note || '',
+    note: isEstimated(tx) ? '' : tx?.note || preset?.note || '',
     kind: tx ? kindOf(tx) : pc ? kindOf(pc) : 'variable',
   };
-  const kinds = [['variable', 'Spending'], ['fixed', 'Bills'], ['income', 'Income']];
+  const kinds = [['variable', 'Spending'], ['fixed', 'Bills'], ...(cats.some(isInvest) ? [['invest', 'Invest']] : []), ['income', 'Income']];
 
   const html = `
     <div class="sheet-h">
@@ -1338,8 +1447,8 @@ function enableReorder(list, onDone) {
 
 // ---- settings ----
 
-const KIND_LABEL = { variable: 'Spending', fixed: 'Bill', income: 'Income' };
-const KIND_GROUP = { variable: 'Weekly spending', fixed: 'Bill', income: 'Income' };
+const KIND_LABEL = { variable: 'Spending', fixed: 'Bill', invest: 'Invest', income: 'Income' };
+const KIND_GROUP = { variable: 'Weekly spending', fixed: 'Bill', invest: 'Invest', income: 'Income' };
 
 function settingsSheet({ showConnect = false } = {}) {
   const e = state.engine, m = mode();
@@ -1367,6 +1476,8 @@ function settingsSheet({ showConnect = false } = {}) {
       total: `<div class="row total"><span>Weekly budget</span><b id="tTotal">${money(e.weeklyTargetTotal, { cents: false })}</b></div>` },
     { k: 'fixed', title: 'Bills', sub: 'Rent, phone, electricity… monthly or every few weeks, fixed or changing amounts. Not part of the weekly budget; Insights shows which are paid.', add: 'New bill',
       total: canEditPlans() ? `<div class="row total"><span>Bills per month</span><b id="tFixed">${money(planTotal('fixed'), { cents: false })}</b></div>` : '' },
+    { k: 'invest', title: 'Invest', sub: 'Set aside first, at the start of each month (TFSA, RRSP, emergency fund…). It comes off what you can spend, so your weekly budgets should fit in what\'s left.', add: 'New invest',
+      total: canEditPlans() ? `<div class="row total"><span>Invest per month</span><b id="tInvest">${money(planTotal('invest'), { cents: false })}</b></div>` : '' },
     { k: 'income', title: 'Income', sub: 'Salary, paychecks… monthly or every 2 weeks. Insights compares it with what you expect each month.', add: 'New income',
       total: canEditPlans() ? `<div class="row total"><span>Expected per month</span><b id="tIncome">${money(planTotal('income'), { cents: false })}</b></div>` : '' },
   ];
@@ -1396,6 +1507,7 @@ function settingsSheet({ showConnect = false } = {}) {
         <button class="row act" data-g="change">${icon('list', 18)}<span>Use a different sheet</span></button>
         ${state.snapshot?.sheet?.id ? `<a class="row act" href="https://docs.google.com/spreadsheets/d/${esc(state.snapshot.sheet.id)}/edit" target="_blank" rel="noopener">${icon('note', 18)}<span>Open the sheet in Google Sheets</span></a>` : ''}
       </div>` : ''}
+      ${isViewOnly() || isDemo() ? '' : '<button class="txt-btn small center" id="joinOther">' + icon('user', 16) + ' Join a budget someone shared with me</button>'}
       ${m === 'sheet' || showConnect ? '' : '<button class="txt-btn small center" id="showScript">Advanced: connect with an Apps Script link</button>'}
       <div id="sheetForm" ${m === 'sheet' || showConnect ? '' : 'hidden'}>
         <div class="card form">
@@ -1465,6 +1577,7 @@ function settingsSheet({ showConnect = false } = {}) {
       }));
 
       $('#showScript', wrap)?.addEventListener('click', (ev) => { ev.currentTarget.hidden = true; $('#sheetForm', wrap).hidden = false; $('#sUrl', wrap).focus(); });
+      $('#joinOther', wrap)?.addEventListener('click', () => joinPaste());
       wrap.querySelectorAll('[data-g]').forEach((b) => b.addEventListener('click', () => {
         const act = b.dataset.g;
         if (act === 'sync') { closeSheet(); refresh(); }
@@ -1507,6 +1620,7 @@ function settingsSheet({ showConnect = false } = {}) {
         await setPlan(inp.dataset.plan, v);
         const sumKind = (k) => [...wrap.querySelectorAll(`[data-plan][data-kind="${k}"]`)].reduce((t, x) => t + (Number(x.value) || 0) * (Number(x.dataset.mult) || 1), 0);
         if ($('#tFixed', wrap)) $('#tFixed', wrap).textContent = money(sumKind('fixed'), { cents: false });
+        if ($('#tInvest', wrap)) $('#tInvest', wrap).textContent = money(sumKind('invest'), { cents: false });
         if ($('#tIncome', wrap)) $('#tIncome', wrap).textContent = money(sumKind('income'), { cents: false });
       }));
       wrap.querySelectorAll('[data-cat-new]').forEach((b) => b.addEventListener('click', () => categorySheet(null, b.dataset.catNew)));
@@ -1569,7 +1683,7 @@ function categorySheet(name, newKind = 'variable') {
     <div class="card form">
       <label><span>Name</span><input id="catName" value="${esc(c?.name || '')}" placeholder="e.g. Pets" maxlength="40" autocomplete="off"></label>
     </div>
-    <div class="seg small" id="catKind" style="margin-top:12px">${['variable', 'fixed', 'income'].map((k) => `<button data-k="${k}">${KIND_GROUP[k]}</button>`).join('')}</div>
+    <div class="seg small" id="catKind" style="margin-top:12px">${['variable', 'fixed', 'invest', 'income'].map((k) => `<button data-k="${k}">${KIND_GROUP[k]}</button>`).join('')}</div>
     <div class="card form" id="catBudget">
       <label><span>Weekly budget</span><span class="money-in">$<input id="catTarget" type="number" inputmode="decimal" min="0" value="${c ? state.engine.targets[c.name] || 0 : 0}"></span></label>
     </div>
@@ -1577,7 +1691,7 @@ function categorySheet(name, newKind = 'variable') {
       <label><span id="catPlanL">Monthly amount</span><span class="money-in">$<input id="catPlanV" type="number" inputmode="decimal" min="0" value="${c ? state.engine.plans[c.name] || 0 : 0}"></span></label>
       ${canAutoAdd() ? (() => {
         const r = c ? state.engine.repeats[c.name] : null;
-        const sel = !r || r.kind === 'none' ? 'off' : r.kind === 'month' ? 'month' : `w${r.every}`;
+        const sel = !r ? (!c && newKind === 'invest' ? 'month' : 'off') : r.kind === 'none' ? 'off' : r.kind === 'month' ? 'month' : `w${r.every}`;
         return `<label><span>Repeats</span><select id="catRep" class="select">${[['off', 'Not automatically'], ['month', 'Every month'], ['w2', 'Every 2 weeks'], ['w1', 'Every week']].map(([v, l]) => `<option value="${v}" ${v === sel ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label id="catDayRow"><span>On day</span><select id="catDay" class="select">${Array.from({ length: 28 }, (_, i) => i + 1).map((d) => `<option value="${d}" ${(r?.kind === 'month' ? r.day : 1) === d ? 'selected' : ''}>${ordinal(d)} of the month</option>`).join('')}</select></label>
       <label id="catFromRow"><span>One pay date</span><input type="date" id="catFrom" value="${r?.kind === 'weeks' ? r.from : todayISO()}"></label>
@@ -1602,7 +1716,7 @@ function categorySheet(name, newKind = 'variable') {
         wrap.querySelectorAll('#catKind button').forEach((b) => b.classList.toggle('on', b.dataset.k === kind));
         $('#catBudget', wrap).hidden = kind !== 'variable';
         $('#catPlan', wrap).hidden = kind === 'variable' || $('#catPlan', wrap).hasAttribute('data-off');
-        $('#catPlanL', wrap).textContent = kind === 'income' ? 'Expected per month' : 'Planned per month';
+        $('#catPlanL', wrap).textContent = kind === 'income' ? 'Expected per month' : kind === 'invest' ? 'Set aside per month' : 'Planned per month';
         const rv = $('#catRep', wrap)?.value || 'off';
         if ($('#catRep', wrap)) {
           $('#catDayRow', wrap).hidden = rv !== 'month';
@@ -1612,6 +1726,7 @@ function categorySheet(name, newKind = 'variable') {
         if ($('#catVaries', wrap)?.checked) $('#catPlanL', wrap).textContent = 'Usual amount';
         if ($('#catVaryHint', wrap)) $('#catVaryHint', wrap).hidden = !$('#catVaries', wrap)?.checked;
         $('#catHint', wrap).textContent = kind === 'variable' ? 'Everyday spending with a weekly budget. Shown in the weekly report.'
+          : kind === 'invest' ? 'Money you set aside first, at the start of the month (TFSA, RRSP, emergency fund…). It comes off what you can spend. Default: recorded on the 1st; change the amount of any month by editing its entry.'
           : kind === 'fixed' ? 'Regular bills like rent or phone. Not part of the weekly budget. Choose how often it repeats and it is recorded by itself on its dates, or tap ✓ in Insights when it is paid.'
           : 'Money coming in. Choose how often it repeats (every month, every 2 weeks…) and it is recorded by itself, or tap ✓ in Insights when it arrives.';
         $('#catPrev', wrap).innerHTML = catIcon($('#catName', wrap).value || 'New', 64);
@@ -1748,6 +1863,13 @@ document.addEventListener('click', (ev) => {
       const ym = t.dataset.ym;
       if (Number(ym.slice(0, 4)) === e.year) { state.tab = 'insights'; state.insights = 'month'; state.month = Number(ym.slice(5, 7)); render(); window.scrollTo({ top: 0 }); }
       else entriesSheet('Filled in for you', 'Check each one', newestFirst().filter(isEstimated));
+      break;
+    }
+    case 'investExtra': {
+      const ym = t.dataset.ym, today = todayISO();
+      const days = new Date(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0).getDate();
+      const cat = categories().find(isInvest);
+      if (cat) entrySheet(null, { category: cat.name, date: today.slice(0, 7) === ym ? today : `${ym}-${String(days).padStart(2, '0')}`, amount: Number(t.dataset.amt), note: 'Extra' });
       break;
     }
     case 'markPaid': markPaid(t.dataset.cat, t.dataset.ym); break;
