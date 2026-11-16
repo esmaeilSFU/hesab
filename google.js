@@ -11,7 +11,14 @@ export const GOOGLE = {
   scope: 'https://www.googleapis.com/auth/drive.file',
 };
 
-const K = { token: 'hesab.g.token', exp: 'hesab.g.exp', state: 'hesab.g.state', sheet: 'hesab.g.sheet', after: 'hesab.g.after', silent: 'hesab.g.silentTried' };
+// The access token is kept only in sessionStorage (this app window, cleared when it closes), never in
+// localStorage, so other pages on the same site can't read it. 'exp' in localStorage only remembers that
+// this phone signed in before, so a closed-and-reopened app can sign back in silently.
+const K = { token: 'hesab.g.token', tokenExp: 'hesab.g.tokenExp', exp: 'hesab.g.exp', state: 'hesab.g.state', sheet: 'hesab.g.sheet', after: 'hesab.g.after', silent: 'hesab.g.silentTried' };
+const ss = {
+  get: (k) => { try { return sessionStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { v == null ? sessionStorage.removeItem(k) : sessionStorage.setItem(k, v); } catch {} },
+};
 const ls = {
   get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
   set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
@@ -22,7 +29,7 @@ export const redirectURI = () => location.origin + location.pathname.replace(/in
 // ───────────── auth
 
 export function token() {
-  const t = ls.get(K.token), exp = Number(ls.get(K.exp) || 0);
+  const t = ss.get(K.token), exp = Number(ss.get(K.tokenExp) || 0);
   return t && exp - Date.now() > 60_000 ? t : null;
 }
 export const hasToken = () => !!token();
@@ -54,9 +61,12 @@ export function handleRedirect() {
   if (h.get('error')) return { ok: false, after, error: h.get('error') };
   const t = h.get('access_token');
   if (!t) return { ok: false, after, error: 'no_token' };
-  ls.set(K.token, t);
-  ls.set(K.exp, String(Date.now() + Number(h.get('expires_in') || 3600) * 1000));
-  ls.set(K.silent, null);
+  const exp = String(Date.now() + Number(h.get('expires_in') || 3600) * 1000);
+  ss.set(K.token, t);
+  ss.set(K.tokenExp, exp);
+  ls.set(K.exp, exp);
+  ls.set(K.token, null); // drop a token saved by older versions
+  ss.set(K.silent, null);
   return { ok: true, after };
 }
 
@@ -69,9 +79,10 @@ export function trySilentRefresh(after = '') {
 }
 
 export function signOut() {
-  const t = ls.get(K.token);
+  const t = ss.get(K.token) || ls.get(K.token);
   if (t) fetch('https://oauth2.googleapis.com/revoke?token=' + encodeURIComponent(t), { method: 'POST', mode: 'no-cors' }).catch(() => {});
   [K.token, K.exp, K.sheet, K.after].forEach((k) => ls.set(k, null));
+  [K.token, K.tokenExp].forEach((k) => ss.set(k, null));
 }
 
 // ───────────── chosen sheet
@@ -132,7 +143,7 @@ export async function listAppSheets() {
   let res;
   try { res = await fetch('https://www.googleapis.com/drive/v3/files?' + qs, { headers: { Authorization: 'Bearer ' + t } }); }
   catch { throw new ApiError('network', navigator.onLine ? 'Could not reach Google.' : 'You are offline.'); }
-  if (res.status === 401) { ls.set(K.exp, String(Date.now())); throw new ApiError('auth', 'Your Google sign-in expired.'); }
+  if (res.status === 401) { ss.set(K.tokenExp, String(Date.now())); throw new ApiError('auth', 'Your Google sign-in expired.'); }
   if (!res.ok) throw new ApiError('google', `Google returned an error (${res.status}).`);
   return ((await res.json()).files || []).map((f) => ({ id: f.id, name: f.name, modified: f.modifiedTime }));
 }
@@ -161,7 +172,7 @@ async function call(path, { method = 'GET', body } = {}) {
   } catch {
     throw new ApiError('network', navigator.onLine ? 'Could not reach Google.' : 'You are offline.');
   }
-  if (res.status === 401) { ls.set(K.exp, String(Date.now())); throw new ApiError('auth', 'Your Google sign-in expired.'); }
+  if (res.status === 401) { ss.set(K.tokenExp, String(Date.now())); throw new ApiError('auth', 'Your Google sign-in expired.'); }
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
     if (res.status === 403 || res.status === 404) throw new ApiError('access', 'Hesab can\'t open this sheet anymore. Choose it again in Settings.');

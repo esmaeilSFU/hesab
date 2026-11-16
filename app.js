@@ -1320,6 +1320,7 @@ function settingsSheet({ showConnect = false } = {}) {
           : `<label><span>Email</span><input id="upEmail" type="email" inputmode="email" autocomplete="email" placeholder="you@example.com"></label>
              <button class="row act" id="upSend">${icon('check', 18)}<span>Email me about new features</span></button>`}
         <label class="row toggle"><span>Share anonymous usage stats</span><input type="checkbox" id="anaToggle" ${track.analyticsOn() ? 'checked' : ''}></label>
+        <a class="row act" href="home.html" target="_blank" rel="noopener">${icon('sparkle', 18)}<span>About Hesab</span></a>
         <a class="row act" href="privacy.html" target="_blank" rel="noopener">${icon('shield', 18)}<span>Privacy policy</span></a>
       </div>
       <p class="hint">Your email is optional and only used for occasional Hesab news. Usage stats are anonymous: never your money, entries or name.</p>
@@ -1400,14 +1401,16 @@ function settingsSheet({ showConnect = false } = {}) {
 
       $('#exportCsv', wrap)?.addEventListener('click', () => saveFile(`hesab-${todayISO()}.csv`, toCSV(state.snapshot), 'text/csv'));
       $('#backupSave', wrap)?.addEventListener('click', async () => {
-        if (await saveFile(`hesab-backup-${todayISO()}.json`, toBackup(state.snapshot), 'application/json')) store.set('hesab.lastBackup', todayISO());
+        if (await saveFile(`hesab-backup-${todayISO()}.json`, toBackup(state.snapshot, lists.exportData()), 'application/json')) store.set('hesab.lastBackup', todayISO());
       });
       $('#backupLoad', wrap)?.addEventListener('change', async (ev) => {
         const file = ev.target.files?.[0]; if (!file) return;
         try {
-          const snap = fromBackup(await file.text());
+          const text = await file.text();
+          const snap = fromBackup(text);
           const n = state.snapshot.transactions.length;
           if (n && !confirm(`Replace the ${n} entries on this phone with the backup (${snap.transactions.length} entries)?`)) return;
+          try { lists.importData(JSON.parse(text).data?.lists); } catch {}
           closeSheet(); useMode('local', snap); toast(`Restored ${snap.transactions.length} entries`);
         } catch (err) { toast(err.message, 'bad'); }
       });
@@ -1652,7 +1655,7 @@ lists.init(() => render());
 document.addEventListener('change', async (ev) => {
   if (ev.target.id !== 'welcomeRestore') return;
   const file = ev.target.files?.[0]; if (!file) return;
-  try { const snap = fromBackup(await file.text()); useMode('local', snap); toast(`Welcome back · ${snap.transactions.length} entries restored`); }
+  try { const text = await file.text(); const snap = fromBackup(text); try { lists.importData(JSON.parse(text).data?.lists); } catch {} useMode('local', snap); toast(`Welcome back · ${snap.transactions.length} entries restored`); }
   catch (err) { toast(err.message, 'bad'); }
 });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh({ quiet: true }); });

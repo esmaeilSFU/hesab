@@ -121,9 +121,9 @@ export function importCSV(snap, text) {
 
 // ---- full backup (everything: entries, categories, order, budgets) ----
 
-export function toBackup(snap) {
+export function toBackup(snap, lists = []) {
   return JSON.stringify({ app: 'hesab', version: 1, exportedAt: new Date().toISOString(), data: {
-    weeksPerBlock: snap.weeksPerBlock, categories: snap.categories, budget: snap.budget,
+    lists, weeksPerBlock: snap.weeksPerBlock, categories: snap.categories, budget: snap.budget,
     transactions: snap.transactions.map(({ row, ...t }) => t),
   } }, null, 1);
 }

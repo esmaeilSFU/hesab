@@ -61,7 +61,12 @@ function overview(header) {
       </button>`;
     }).join('')}</div>`
     : `<section class="card l-empty">${icon('cart', 34)}<b>No lists yet</b><p>Make a shopping list, split it into sections like Produce or Costco, and tick things off as you go.</p></section>`}
-    <button class="primary l-new" data-l="new">${icon('plus', 18, 2.4)} New list</button>`;
+    <button class="primary l-new" data-l="new">${icon('plus', 18, 2.4)} New list</button>
+    <div class="l-foot">
+      ${lists.length ? `<button class="txt-btn" data-l="backup">Back up lists</button>` : ''}
+      <label class="txt-btn">Restore lists<input type="file" data-l-file accept=".json,application/json" hidden></label>
+    </div>
+    <p class="hint center">Lists are kept on this phone only. Back them up before changing phones.</p>`;
 }
 
 function detail(l) {
@@ -166,6 +171,14 @@ function onClick(ev) {
     case 'uncheck':
       l.sections.forEach((s) => s.items.forEach((i) => { i.done = false; })); touch(l); save(); redraw();
       break;
+    case 'backup': {
+      const text = JSON.stringify({ app: 'hesab-lists', version: 1, exportedAt: new Date().toISOString(), lists: data.lists }, null, 1);
+      const name = `hesab-lists-${new Date().toISOString().slice(0, 10)}.json`;
+      const file = new File([text], name, { type: 'application/json' });
+      if (/iPhone|iPad|iPod|Android/.test(navigator.userAgent) && navigator.canShare?.({ files: [file] })) navigator.share({ files: [file], title: name }).catch(() => {});
+      else { const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
+      break;
+    }
     case 'deleteList':
       if (!confirm(`Delete “${l.title || 'this list'}”? This can't be undone.`)) return;
       data.lists = data.lists.filter((x) => x.id !== l.id); openId = null; save(true); redraw(); window.scrollTo(0, 0);
@@ -244,6 +257,34 @@ function onBlur(ev) {
     if (again && !again.item.text.trim()) { again.s.items.splice(again.i, 1); touch(l); save(); redraw(); }
   }, 0);
 }
+
+/** Lists for a backup file, and restoring them (added to the lists already here; same list = replaced). */
+export const exportData = () => data.lists;
+export function importData(lists) {
+  if (!Array.isArray(lists)) return 0;
+  const clean = lists.filter((l) => l && typeof l === 'object').map((l) => ({
+    id: String(l.id || uid()), title: String(l.title || '').slice(0, 60), updated: Number(l.updated) || Date.now(),
+    sections: (Array.isArray(l.sections) ? l.sections : []).map((s) => ({
+      id: String(s.id || uid()), title: String(s.title || '').slice(0, 40),
+      items: (Array.isArray(s.items) ? s.items : []).map((i) => ({ id: String(i.id || uid()), text: String(i.text || '').slice(0, 120), done: !!i.done })),
+    })),
+  })).filter((l) => l.sections.length);
+  for (const l of clean) { const i = data.lists.findIndex((x) => x.id === l.id); if (i >= 0) data.lists[i] = l; else data.lists.push(l); }
+  save(true);
+  return clean.length;
+}
+
+document.addEventListener('change', async (ev) => {
+  const input = ev.target.closest?.('[data-l-file]');
+  if (!input) return;
+  const file = input.files?.[0]; if (!file) return;
+  try {
+    const j = JSON.parse(await file.text());
+    const n = importData(j?.lists || j?.data?.lists);
+    alert(n ? `Restored ${n} list${n === 1 ? '' : 's'}.` : 'No lists found in this file.');
+    rerender();
+  } catch { alert('This is not a Hesab lists backup.'); }
+});
 
 /** Leaving a list drops empty items and empty unnamed extra sections. */
 function cleanup(l) {
