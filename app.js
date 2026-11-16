@@ -47,6 +47,17 @@ const canEditCategories = () => isLocal() || isDemo() || (isGoogle() && !!state.
 const canEditPlans = () => mode() !== 'sheet';
 const MAX_SPENDING_CATS = 30; // the sheet's report tabs hold up to 30 spending categories
 
+/** Joined someone's budget as a viewer: Google won't accept changes, so the app doesn't offer them. */
+const VIEW_KEY = (id) => 'hesab.g.view.' + id;
+const isViewOnly = () => isGoogle() && store.get(VIEW_KEY(g.chosenSheet()?.id || '')) === '1';
+function viewOnlyStop() { if (!isViewOnly()) return false; toast('You can view this budget but not change it. Ask its owner for edit access.', 'bad'); return true; }
+
+/** Shopping lists follow the budget: in Google Sheet mode they're saved in its "Lists" tab too. */
+function wireLists() {
+  const c = isGoogle() && g.hasToken() ? api() : null;
+  lists.setRemote(c ? { pull: () => c.readLists(), push: (rows) => c.writeLists(rows), canWrite: !isViewOnly() } : null);
+}
+
 let sheetsClient = null;
 const api = () => {
   if (isGoogle()) {
@@ -77,7 +88,7 @@ function useMode(m, snap) {
   const prev = mode();
   store.set(LS.mode, m);
   if (m !== 'sheet') [LS.url, LS.token].forEach((k) => store.set(k, null));
-  if (m !== 'google' && prev === 'google') { g.signOut(); sheetsClient = null; }
+  if (m !== 'google' && prev === 'google') { g.signOut(); sheetsClient = null; lists.setRemote(null); }
   if (!isRemote()) { [LS.cache, LS.synced, LS.queue].forEach((k) => store.set(k, null)); state.synced = null; }
   setSnapshot(snap);
   render();
@@ -159,10 +170,11 @@ async function refresh({ quiet = false } = {}) {
     state.syncing = false;
     render();
   }
-  if (ok && isGoogle()) autoAdd();
+  if (ok && isGoogle()) { autoAdd(); wireLists(); }
 }
 
 async function mutate(optimistic, op, successMsg) {
+  if (viewOnlyStop()) return null;
   const before = structuredClone(state.snapshot);
   optimistic(state.snapshot);
   setSnapshot(state.snapshot, { keepWeek: true });
@@ -237,7 +249,7 @@ function setPlan(category, value) {
   );
 }
 
-const canAutoAdd = () => isLocal() || isGoogle();
+const canAutoAdd = () => isLocal() || (isGoogle() && !isViewOnly());
 let autoRunning = false;
 /** Repeating bills and income are recorded by themselves on their dates in the current month.
  *  A date counts as done when the month already has an entry for that category near it (monthly: any entry). */
@@ -318,6 +330,7 @@ function syncCategories(renames = {}) {
 }
 
 function saveCategory(oldName, { name, kind, target, plan, repeat = '' }) {
+  if (isViewOnly()) return 'You can view this budget but not change it.';
   const s = state.snapshot;
   name = name.trim();
   if (!name) return 'Give the category a name.';
@@ -380,7 +393,7 @@ async function googleConnect(how) {
 }
 
 /** Opens a sheet Hesab has access to and switches the app to it. */
-async function connectTo(sheet, { fromLink = false } = {}) {
+async function connectTo(sheet, { fromLink = false, join = false } = {}) {
   try {
     toast('Opening your sheet…');
     const snap = await new g.SheetsClient(sheet).bootstrap();
@@ -389,11 +402,13 @@ async function connectTo(sheet, { fromLink = false } = {}) {
     queue.save([]);
     useMode('google', snap);
     state.synced = new Date().toISOString(); store.set(LS.synced, state.synced);
-    closeSheet(); render();
+    closeSheet(); render(); wireLists();
     toast(`Connected to “${snap.sheet.title}” · ${snap.transactions.length} entries`);
     return true;
   } catch (e) {
-    if (e.code === 'access' && fromLink) {
+    if (e.code === 'access' && join) {
+      toast('This Google account can\'t open that budget yet. Use the account the invitation was sent to, or ask the owner to share it again.', 'bad');
+    } else if (e.code === 'access' && fromLink) {
       toast(g.pickerWorks()
         ? 'Hesab doesn\'t have access to that sheet yet. Use “Browse Google Drive” to choose it once.'
         : 'Hesab doesn\'t have access to that sheet yet. Choose it once on a computer (see below), then it shows up here.', 'bad');
@@ -415,7 +430,7 @@ function existingSheetChooser() {
       <div class="share-row"><input class="share-url" id="gLink" type="url" inputmode="url" placeholder="https://docs.google.com/spreadsheets/d/…" aria-label="Google Sheet link"><button class="ghost" id="gOpen">Open</button></div>
       ${canBrowse
         ? '<button class="ghost" id="gBrowse">Browse Google Drive</button>'
-        : `<p class="hint">Don’t see your sheet? On a computer, open <b>${esc(location.host + location.pathname)}</b>, sign in with the same Google account and choose it under <b>Use a sheet I already have → Browse Google Drive</b>. It will then appear in this list on your phone. (iPhone Safari blocks Google’s file browser.)</p>`}
+        : `${g.canOpenSharedSheets() ? '' : '<button class="ghost" id="gShared">Open a sheet someone shared with me</button>'}<p class="hint">Don’t see your sheet? Tap above and paste its link, or on a computer open <b>${esc(location.host + location.pathname)}</b>, sign in with the same Google account and choose it under <b>Use a sheet I already have → Browse Google Drive</b>. It will then appear in this list on your phone. (iPhone Safari blocks Google’s file browser.)</p>`}
     </div>`, {
     cls: 'tall',
     async onMount(wrap) {
@@ -425,6 +440,7 @@ function existingSheetChooser() {
         if (!id) { toast('That doesn’t look like a Google Sheets link.', 'bad'); return; }
         connectTo({ id, name: 'Google Sheet' }, { fromLink: true });
       });
+      $('#gShared', wrap)?.addEventListener('click', () => g.signIn({ after: 'pick', sheets: true }));
       $('#gBrowse', wrap)?.addEventListener('click', async () => {
         try { const sheet = await g.pickSheet(); if (sheet) connectTo(sheet); } catch (e) { toast(e.message, 'bad'); }
       });
@@ -440,6 +456,103 @@ function existingSheetChooser() {
       }
     },
   });
+}
+
+// ───────────────────────────────────────────── sharing a budget
+
+/** Owner side: invite people by email (Google sends the invitation) and see who has access. */
+function shareSheet() {
+  const sh = g.chosenSheet();
+  if (!sh) return;
+  let role = 'writer';
+  const roleLabel = { owner: 'Owner', writer: 'Can edit', fileOrganizer: 'Can edit', organizer: 'Can edit', commenter: 'Can view', reader: 'Can view' };
+  openSheet(`
+    <div class="sheet-h"><span style="width:56px"></span><b>Share budget</b><button class="txt-btn" data-close>Done</button></div>
+    <div class="sheet-scroll">
+      <p class="hint">Invite someone with their Google account. Google emails them an invitation; the link in it opens Hesab on their phone and connects them to this budget, including the shopping lists.</p>
+      <div class="card form">
+        <label><span>Email</span><input id="shEmail" type="email" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="name@gmail.com"></label>
+        <div class="row"><span>Access</span><div class="seg small" id="shRole"><button class="on" data-r="writer">Can edit</button><button data-r="reader">Can view</button></div></div>
+      </div>
+      <button class="primary" id="shSend">Send invitation</button>
+      <h3 class="grp">People with access</h3>
+      <div class="card list" id="shPeople"><p class="empty">Loading…</p></div>
+      <button class="txt-btn center" id="shCopy">Copy join link</button>
+      <p class="hint">People who already have access can use the join link too. Removing someone here takes away their access to the sheet.</p>
+    </div>`, {
+    cls: 'tall',
+    async onMount(wrap) {
+      const people = $('#shPeople', wrap);
+      const load = async () => {
+        try {
+          const list = await g.listPeople(sh.id);
+          people.innerHTML = list.map((p) => `<div class="row person">
+              <span class="p-ic">${esc((p.name || p.email || '?').slice(0, 1).toUpperCase())}</span>
+              <span class="p-t"><b>${esc(p.name || p.email)}</b>${p.name && p.email ? `<small>${esc(p.email)}</small>` : ''}</span>
+              <small class="muted">${roleLabel[p.role] || p.role}</small>
+              ${p.role === 'owner' ? '' : `<button class="l-x" data-rm="${esc(p.id)}" data-who="${esc(p.name || p.email)}" aria-label="Remove ${esc(p.name || p.email)}">${icon('close', 16, 2.2)}</button>`}
+            </div>`).join('') || '<p class="empty">Only you.</p>';
+          people.querySelectorAll('[data-rm]').forEach((b) => b.addEventListener('click', async () => {
+            if (!confirm(`Remove ${b.dataset.who}? They won't be able to open this budget anymore.`)) return;
+            try { await g.removePerson(sh.id, b.dataset.rm); toast('Removed'); load(); } catch (e) { toast(e.message, 'bad'); }
+          }));
+        } catch (e) { people.innerHTML = `<p class="empty">${esc(e.message)}</p>`; }
+      };
+      load();
+      $('#shRole', wrap).addEventListener('click', (ev) => {
+        const b = ev.target.closest('[data-r]'); if (!b) return;
+        role = b.dataset.r;
+        wrap.querySelectorAll('#shRole button').forEach((x) => x.classList.toggle('on', x === b));
+      });
+      $('#shSend', wrap).addEventListener('click', async (ev) => {
+        const email = $('#shEmail', wrap).value.trim();
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { toast('Enter their email address.', 'bad'); return; }
+        const btn = ev.currentTarget; btn.disabled = true;
+        try {
+          const link = g.joinLink(sh.id, role);
+          await g.invitePerson(sh.id, { email, role, message: `You're invited to a shared budget in Hesab${role === 'reader' ? ' (view only)' : ''}.\n\nOn your phone, open this link and sign in with this Google account to join:\n${link}` });
+          toast(`Invitation sent to ${email}`);
+          $('#shEmail', wrap).value = '';
+          load();
+        } catch (e) { toast(e.message, 'bad'); }
+        finally { btn.disabled = false; }
+      });
+      $('#shCopy', wrap).addEventListener('click', async () => {
+        const link = g.joinLink(sh.id, role);
+        try { await navigator.clipboard.writeText(link); toast('Join link copied'); } catch { prompt('Copy this link:', link); }
+      });
+    },
+  });
+}
+
+/** Invitee side: a ?join= link was opened. */
+const JOIN_KEY = 'hesab.join';
+const pendingJoin = () => { try { return JSON.parse(store.get(JOIN_KEY)); } catch { return null; } };
+
+function joinSheet() {
+  const j = pendingJoin(); if (!j) return;
+  if (isGoogle() && g.chosenSheet()?.id === j.id) { store.set(JOIN_KEY, null); toast('You\'re already on this budget.'); return; }
+  openSheet(`
+    <div class="sheet-h"><span style="width:56px"></span><b>Shared budget</b><button class="txt-btn" id="jLater">Not now</button></div>
+    <div class="install-hero"><span class="g-badge">${icon('user', 30)}</span>
+      <p>Someone shared a Hesab budget with you${j.view ? ' to view' : ''}. Sign in with the <b>Google account the invitation was sent to</b>.</p></div>
+    <button class="primary" id="jGo">Join with Google</button>
+    <p class="hint center">Google will ask to let Hesab open your Google Sheets, so it can open the one shared with you. Hesab never changes other sheets.${isLocal() && state.snapshot?.transactions.length ? ' Your entries on this phone stay here; the app will show the shared budget.' : ''}</p>`, {
+    onMount(wrap) {
+      $('#jLater', wrap).addEventListener('click', () => { store.set(JOIN_KEY, null); closeSheet(); });
+      $('#jGo', wrap).addEventListener('click', () => {
+        if (g.hasToken() && g.canOpenSharedSheets()) finishJoin();
+        else g.signIn({ after: 'join', sheets: true });
+      });
+    },
+  });
+}
+
+async function finishJoin() {
+  const j = pendingJoin(); if (!j) return;
+  store.set(VIEW_KEY(j.id), j.view ? '1' : null);
+  const ok = await connectTo({ id: j.id, name: 'Shared budget' }, { join: true });
+  if (ok) { store.set(JOIN_KEY, null); track.event('joined', mode()); }
 }
 
 function googleSheetChooser() {
@@ -474,6 +587,7 @@ function render() {
   if (!state.engine) return;
   renderChrome();
   document.body.classList.toggle('on-lists', state.tab === 'lists');
+  document.body.classList.toggle('view-only', isViewOnly());
   const html = state.tab === 'week' ? weekView() : state.tab === 'activity' ? activityView() : state.tab === 'lists' ? lists.view(header) : insightsView();
   view().innerHTML = html;
   view().dataset.tab = state.tab;
@@ -1092,6 +1206,7 @@ function enableDragToClose(wrap) {
 
 /** Add or edit an entry. `preset` pre-fills a new one (e.g. a bill whose amount changes each month). */
 function entrySheet(tx = null, preset = null) {
+  if (!tx && viewOnlyStop()) return;
   const cats = categories();
   const pc = preset?.category ? catByName(preset.category) : null;
   const draft = {
@@ -1277,6 +1392,7 @@ function settingsSheet({ showConnect = false } = {}) {
         <div class="row"><span>Sheet</span><b class="ellip">${esc(state.snapshot?.sheet?.title || gSheet?.name || '—')}</b></div>
         <div class="row"><span>Status</span><b class="${g.hasToken() ? 'pos' : 'neg'}">${g.hasToken() ? (pendingCount() ? `${pendingCount()} waiting to sync` : 'Signed in') : 'Signed out'}</b></div>
         ${g.hasToken() ? '<button class="row act" data-g="sync">' + icon('sync', 18) + '<span>Sync now</span></button>' : '<button class="row act" data-g="signin">' + icon('sync', 18) + '<span>Sign in with Google</span></button>'}
+        ${isViewOnly() ? `<div class="row"><span>Access</span><b>View only</b></div>` : g.hasToken() ? `<button class="row act" data-g="share">${icon('user', 18)}<span>Share this budget</span></button>` : ''}
         <button class="row act" data-g="change">${icon('list', 18)}<span>Use a different sheet</span></button>
         ${state.snapshot?.sheet?.id ? `<a class="row act" href="https://docs.google.com/spreadsheets/d/${esc(state.snapshot.sheet.id)}/edit" target="_blank" rel="noopener">${icon('note', 18)}<span>Open the sheet in Google Sheets</span></a>` : ''}
       </div>` : ''}
@@ -1354,6 +1470,7 @@ function settingsSheet({ showConnect = false } = {}) {
         if (act === 'sync') { closeSheet(); refresh(); }
         if (act === 'signin') g.signIn({ after: 'sync' });
         if (act === 'change') googleSheetChooser();
+        if (act === 'share') shareSheet();
       }));
       $('#upSend', wrap)?.addEventListener('click', async () => {
         try { await track.signUp($('#upEmail', wrap).value, mode()); toast('Thanks! You’re on the list'); settingsSheet(); }
@@ -1663,6 +1780,12 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 // ───────────────────────────────────────────── boot
 
 (function boot() {
+  // Opened from a "join this budget" invitation link?
+  const qp = new URLSearchParams(location.search);
+  if (qp.get('join')) {
+    store.set(JOIN_KEY, JSON.stringify({ id: qp.get('join').replace(/[^a-zA-Z0-9_-]/g, ''), view: qp.has('view') }));
+    history.replaceState(null, '', location.pathname + location.hash);
+  }
   // Coming back from Google's sign-in page?
   const back = g.handleRedirect();
   // Earlier versions had no mode flag: a saved URL means the Apps Script sheet.
@@ -1677,7 +1800,8 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
   if (back) {
     if (!state.engine) setSnapshot(isLocal() ? loadLocal() || starterSnapshot() : starterSnapshot());
     render();
-    if (back.ok && (back.after === 'create' || back.after === 'pick')) googleConnect(back.after);
+    if (back.ok && back.after === 'join') finishJoin();
+    else if (back.ok && (back.after === 'create' || back.after === 'pick')) googleConnect(back.after);
     else if (back.ok) refresh();
     else if (back.error !== 'interaction_required' && back.error !== 'login_required' && back.error !== 'consent_required') {
       toast(back.error === 'access_denied' ? 'Google sign-in was cancelled.' : 'Google sign-in did not finish. Try again.', 'bad');
@@ -1687,6 +1811,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
     if (m === 'google' && !g.hasToken() && g.trySilentRefresh('sync')) return;
     render();
     refresh({ quiet: true });
+    if (pendingJoin()) joinSheet();
   }
   track.ping(mode());
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});

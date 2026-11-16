@@ -1,9 +1,11 @@
-// Shopping lists: a small notes-like tool, kept apart from the budget.
-// Lists live only on this device (localStorage) and never touch entries, categories or the sheet.
+// Shopping lists: a small notes-like tool, kept apart from the budget's numbers.
+// Saved on this device (localStorage) and, when the budget is a Google Sheet, also in its "Lists" tab so
+// everyone who shares the budget sees the same lists. Each list, section and item carries `u` (last
+// changed, ms) and deletions leave a tombstone in `dead`, so two phones editing at once merge cleanly.
 //
-//   list    = { id, title, sections: [section], updated }
-//   section = { id, title, items: [item] }
-//   item    = { id, text, done }
+//   list    = { id, title, sections: [section], updated, u }
+//   section = { id, title, items: [item], u }
+//   item    = { id, text, done, u }
 
 import { icon } from './icons.js';
 import { esc } from './format.js';
@@ -17,17 +19,21 @@ let openId = null;
 function load() {
   try {
     const d = JSON.parse(localStorage.getItem(KEY));
-    if (d && Array.isArray(d.lists)) return d;
+    if (d && Array.isArray(d.lists)) { d.dead = d.dead || {}; return d; }
   } catch {}
-  return { lists: [] };
+  return { lists: [], dead: {} };
 }
 let saveTimer = null;
-function save(now = false) {
+function save(now = false, { local = false } = {}) {
   clearTimeout(saveTimer);
   const write = () => { try { localStorage.setItem(KEY, JSON.stringify(data)); } catch {} };
   if (now) write(); else saveTimer = setTimeout(write, 250);
+  if (!local) scheduleSync();
 }
-const touch = (l) => { if (l) l.updated = Date.now(); };
+/** Marks a list (and any of its sections or items passed) as just changed. */
+const touch = (l, ...nodes) => { const t = Date.now(); if (l) { l.updated = t; } nodes.forEach((n) => { if (n) n.u = t; }); };
+/** Remembers that these ids were deleted, so a sync doesn't bring them back. */
+const bury = (...nodes) => { const t = Date.now(); for (const n of nodes) { if (!n) continue; data.dead[n.id] = t; (n.sections || []).forEach((x) => bury(x)); (n.items || []).forEach((x) => bury(x)); } };
 
 const byId = (id) => data.lists.find((l) => l.id === id);
 const findItem = (l, itemId) => {
@@ -49,7 +55,7 @@ export function view(header) {
 
 function overview(header) {
   const lists = [...data.lists].sort((a, b) => (b.updated || 0) - (a.updated || 0));
-  return `${header('Lists', 'Shopping & to-do · on this phone')}
+  return `${header('Lists', remote ? 'Shopping & to-do · shared' : 'Shopping & to-do · on this phone')}
     ${lists.length ? `<div class="l-cards">${lists.map((l) => {
       const c = counts(l), total = c.left + c.done;
       return `<button class="card l-card" data-l="open" data-id="${l.id}">
@@ -66,7 +72,7 @@ function overview(header) {
       ${lists.length ? `<button class="txt-btn" data-l="backup">Back up lists</button>` : ''}
       <label class="txt-btn">Restore lists<input type="file" data-l-file accept=".json,application/json" hidden></label>
     </div>
-    <p class="hint center">Lists are kept on this phone only. Back them up before changing phones.</p>`;
+    <p class="hint center">${remote ? `Saved in your budget sheet${remote.canWrite ? '' : ' (view only)'}, so everyone who shares the budget sees the same lists.` : 'Lists are kept on this phone only. Back them up before changing phones.'}</p>`;
 }
 
 function detail(l) {
@@ -139,22 +145,23 @@ function onClick(ev) {
     case 'open': openId = b.dataset.id; redraw(); window.scrollTo(0, 0); break;
     case 'back': cleanup(l); openId = null; save(true); redraw(); window.scrollTo(0, 0); break;
     case 'new': {
-      const nl = { id: uid(), title: '', sections: [{ id: uid(), title: '', items: [] }], updated: Date.now() };
+      const t = Date.now();
+      const nl = { id: uid(), title: '', sections: [{ id: uid(), title: '', items: [], u: t }], updated: t, u: t };
       data.lists.push(nl); openId = nl.id; save(true); redraw('.l-title'); window.scrollTo(0, 0);
       break;
     }
     case 'toggle': {
       const f = l && findItem(l, b.dataset.item); if (!f) return;
-      f.item.done = !f.item.done; touch(l); save(); redraw();
+      f.item.done = !f.item.done; touch(l, f.item); save(); redraw();
       break;
     }
     case 'delItem': {
       const f = l && findItem(l, b.dataset.item); if (!f) return;
-      f.s.items.splice(f.i, 1); touch(l); save(); redraw();
+      bury(f.item); f.s.items.splice(f.i, 1); touch(l); save(); redraw();
       break;
     }
     case 'addSection': {
-      const s = { id: uid(), title: '', items: [] };
+      const s = { id: uid(), title: '', items: [], u: Date.now() };
       l.sections.push(s); touch(l); save(); redraw(`[data-f="section"][data-sec="${s.id}"]`);
       break;
     }
@@ -162,14 +169,14 @@ function onClick(ev) {
       const i = l.sections.findIndex((s) => s.id === b.dataset.sec); if (i < 0) return;
       const s = l.sections[i], n = s.items.filter((x) => x.text.trim()).length;
       if (n && !confirm(`Delete “${s.title || 'this section'}” and its ${n} item${n === 1 ? '' : 's'}?`)) return;
-      l.sections.splice(i, 1); touch(l); save(); redraw();
+      bury(s); l.sections.splice(i, 1); touch(l); save(); redraw();
       break;
     }
     case 'clearDone':
-      l.sections.forEach((s) => { s.items = s.items.filter((i) => !i.done); }); touch(l); save(); redraw();
+      l.sections.forEach((s) => { s.items.filter((i) => i.done).forEach((i) => bury(i)); s.items = s.items.filter((i) => !i.done); }); touch(l); save(); redraw();
       break;
     case 'uncheck':
-      l.sections.forEach((s) => s.items.forEach((i) => { i.done = false; })); touch(l); save(); redraw();
+      l.sections.forEach((s) => s.items.forEach((i) => { if (i.done) { i.done = false; touch(null, i); } })); touch(l); save(); redraw();
       break;
     case 'backup': {
       const text = JSON.stringify({ app: 'hesab-lists', version: 1, exportedAt: new Date().toISOString(), lists: data.lists }, null, 1);
@@ -181,7 +188,7 @@ function onClick(ev) {
     }
     case 'deleteList':
       if (!confirm(`Delete “${l.title || 'this list'}”? This can't be undone.`)) return;
-      data.lists = data.lists.filter((x) => x.id !== l.id); openId = null; save(true); redraw(); window.scrollTo(0, 0);
+      bury(l); data.lists = data.lists.filter((x) => x.id !== l.id); openId = null; save(true); redraw(); window.scrollTo(0, 0);
       break;
   }
 }
@@ -192,11 +199,11 @@ function onInput(ev) {
   const l = el && openId && byId(openId);
   if (!l) return;
   const f = el.dataset.f;
-  if (f === 'title') l.title = el.value;
-  else if (f === 'section') { const s = l.sections.find((x) => x.id === el.dataset.sec); if (s) s.title = el.value; }
-  else if (f === 'item') { const it = findItem(l, el.dataset.item); if (it) it.item.text = el.value; }
+  if (f === 'title') { l.title = el.value; touch(l, l); }
+  else if (f === 'section') { const s = l.sections.find((x) => x.id === el.dataset.sec); if (s) { s.title = el.value; touch(l, s); } }
+  else if (f === 'item') { const it = findItem(l, el.dataset.item); if (it) { it.item.text = el.value; touch(l, it.item); } }
   else return;
-  touch(l); save();
+  save();
 }
 
 function addItems(l, secId, texts, focusAfter = true) {
@@ -204,9 +211,10 @@ function addItems(l, secId, texts, focusAfter = true) {
   const clean = texts.map((t) => t.replace(/^\s*[-*•·\d.)\]]*\s*(\[[ x]\]\s*)?/i, '').trim()).filter(Boolean);
   if (!clean.length) return;
   // new items go after the unticked ones, before the ticked ones
-  const firstDone = s.items.findIndex((i) => i.done);
-  const at = firstDone < 0 ? s.items.length : firstDone;
-  s.items.splice(at, 0, ...clean.map((text) => ({ id: uid(), text, done: false })));
+  let at = 0;
+  s.items.forEach((i, k) => { if (!i.done) at = k + 1; });
+  const t = Date.now();
+  s.items.splice(at, 0, ...clean.map((text) => ({ id: uid(), text, done: false, u: t })));
   touch(l); save();
   redraw(focusAfter ? `[data-f="add"][data-sec="${secId}"]` : null);
 }
@@ -229,7 +237,7 @@ function onKey(ev) {
     ev.preventDefault();
     const it = findItem(l, el.dataset.item); if (!it) return;
     const prev = it.s.items[it.i - 1];
-    it.s.items.splice(it.i, 1); touch(l); save();
+    bury(it.item); it.s.items.splice(it.i, 1); touch(l); save();
     redraw(prev ? `[data-f="item"][data-item="${prev.id}"]` : `[data-f="add"][data-sec="${it.s.id}"]`);
   }
 }
@@ -254,7 +262,7 @@ function onBlur(ev) {
   setTimeout(() => {
     if (document.activeElement?.closest?.(`[data-item="${it.item.id}"]`)) return;
     const again = findItem(l, it.item.id);
-    if (again && !again.item.text.trim()) { again.s.items.splice(again.i, 1); touch(l); save(); redraw(); }
+    if (again && !again.item.text.trim()) { bury(again.item); again.s.items.splice(again.i, 1); touch(l); save(); redraw(); }
   }, 0);
 }
 
@@ -263,13 +271,17 @@ export const exportData = () => data.lists;
 export function importData(lists) {
   if (!Array.isArray(lists)) return 0;
   const clean = lists.filter((l) => l && typeof l === 'object').map((l) => ({
-    id: String(l.id || uid()), title: String(l.title || '').slice(0, 60), updated: Number(l.updated) || Date.now(),
+    id: String(l.id || uid()), title: String(l.title || '').slice(0, 60), updated: Number(l.updated) || Date.now(), u: Date.now(),
     sections: (Array.isArray(l.sections) ? l.sections : []).map((s) => ({
-      id: String(s.id || uid()), title: String(s.title || '').slice(0, 40),
-      items: (Array.isArray(s.items) ? s.items : []).map((i) => ({ id: String(i.id || uid()), text: String(i.text || '').slice(0, 120), done: !!i.done })),
+      id: String(s.id || uid()), title: String(s.title || '').slice(0, 40), u: Date.now(),
+      items: (Array.isArray(s.items) ? s.items : []).map((i) => ({ id: String(i.id || uid()), text: String(i.text || '').slice(0, 120), done: !!i.done, u: Date.now() })),
     })),
   })).filter((l) => l.sections.length);
-  for (const l of clean) { const i = data.lists.findIndex((x) => x.id === l.id); if (i >= 0) data.lists[i] = l; else data.lists.push(l); }
+  for (const l of clean) {
+    const i = data.lists.findIndex((x) => x.id === l.id);
+    [l, ...l.sections, ...l.sections.flatMap((s) => s.items)].forEach((n) => delete data.dead[n.id]);
+    if (i >= 0) data.lists[i] = l; else data.lists.push(l);
+  }
   save(true);
   return clean.length;
 }
@@ -289,7 +301,99 @@ document.addEventListener('change', async (ev) => {
 /** Leaving a list drops empty items and empty unnamed extra sections. */
 function cleanup(l) {
   if (!l) return;
-  l.sections.forEach((s) => { s.items = s.items.filter((i) => i.text.trim()); });
-  if (l.sections.length > 1) l.sections = l.sections.filter((s, i) => i === 0 || s.title.trim() || s.items.length);
-  if (!l.title.trim() && !counts(l).left && !counts(l).done) data.lists = data.lists.filter((x) => x.id !== l.id);
+  l.sections.forEach((s) => { s.items.filter((i) => !i.text.trim()).forEach((i) => bury(i)); s.items = s.items.filter((i) => i.text.trim()); });
+  if (l.sections.length > 1) {
+    l.sections.filter((s, i) => !(i === 0 || s.title.trim() || s.items.length)).forEach((s) => bury(s));
+    l.sections = l.sections.filter((s, i) => i === 0 || s.title.trim() || s.items.length);
+  }
+  if (!l.title.trim() && !counts(l).left && !counts(l).done) { bury(l); data.lists = data.lists.filter((x) => x.id !== l.id); }
 }
+
+
+// ───────────────────────────── sync with the budget sheet's "Lists" tab
+
+let remote = null;              // { pull(): rows, push(rows), canWrite }
+let syncing = false, again = false, syncTimer = null, redrawLater = false;
+
+/** Turns sync on for a Google Sheet budget (or off with null). */
+export function setRemote(r) { remote = r; if (r) scheduleSync(0); }
+export function syncNow() { if (remote) scheduleSync(0); }
+function scheduleSync(ms = 1200) { if (!remote) return; clearTimeout(syncTimer); syncTimer = setTimeout(sync, ms); }
+
+const DAY = 86400000;
+function flatten(d) {
+  const rows = [];
+  d.lists.forEach((l, i) => {
+    rows.push(['L', l.id, '', l.title, '', i, l.u || 0, '']);
+    l.sections.forEach((s, j) => {
+      rows.push(['S', s.id, l.id, s.title, '', j, s.u || 0, '']);
+      s.items.forEach((it, k) => rows.push(['I', it.id, s.id, it.text, it.done ? 1 : 0, k, it.u || 0, '']));
+    });
+  });
+  const old = Date.now() - 60 * DAY;
+  for (const [id, t] of Object.entries(d.dead)) if (t > old) rows.push(['X', id, '', '', '', 0, t, 1]);
+  return rows;
+}
+function unflatten(rows) {
+  const nodes = new Map(), dead = {};
+  for (const r of rows || []) {
+    const [kind, id, parent, text, done, order, u] = r.map((x) => (x == null ? '' : x));
+    if (!id) continue;
+    if (kind === 'X') { dead[id] = Math.max(dead[id] || 0, Number(u) || 0); continue; }
+    if (!'LSI'.includes(kind)) continue;
+    nodes.set(String(id), { kind, id: String(id), parent: String(parent), text: String(text), done: done === 1 || done === '1' || done === true || done === 'TRUE', order: Number(order) || 0, u: Number(u) || 0 });
+  }
+  return { nodes, dead };
+}
+function merge(a, b) {
+  const dead = { ...a.dead };
+  for (const [id, t] of Object.entries(b.dead)) dead[id] = Math.max(dead[id] || 0, t);
+  const nodes = new Map(a.nodes);
+  for (const [id, n] of b.nodes) { const m = nodes.get(id); if (!m || n.u > m.u) nodes.set(id, n); }
+  for (const [id, n] of nodes) if (dead[id] != null && dead[id] >= n.u) nodes.delete(id);
+  return { nodes, dead };
+}
+function build({ nodes, dead }) {
+  const all = [...nodes.values()];
+  const sort = (x, y) => x.order - y.order || x.u - y.u;
+  const kids = (kind, parent) => all.filter((n) => n.kind === kind && n.parent === parent).sort(sort);
+  const old = Date.now() - 60 * DAY;
+  return {
+    dead: Object.fromEntries(Object.entries(dead).filter(([, t]) => t > old)),
+    lists: all.filter((n) => n.kind === 'L').sort(sort).map((l) => {
+      const prev = data.lists.find((x) => x.id === l.id);
+      return {
+        id: l.id, title: l.text, u: l.u, updated: Math.max(prev?.updated || 0, l.u),
+        sections: kids('S', l.id).map((s) => ({ id: s.id, title: s.text, u: s.u, items: kids('I', s.id).map((i) => ({ id: i.id, text: i.text, done: i.done, u: i.u })) })),
+      };
+    }).filter((l) => l.sections.length),
+  };
+}
+const sig = (rows) => JSON.stringify((rows || []).map((r) => Array.from({ length: 8 }, (_, i) => String(r[i] ?? ''))).sort());
+
+async function sync() {
+  if (!remote) return;
+  if (syncing) { again = true; return; }
+  syncing = true;
+  try {
+    const rows = await remote.pull();
+    const before = flatten(data);
+    const merged = build(merge(unflatten(before), unflatten(rows)));
+    // Lists only this phone had (before sync was on) keep their place; nothing is lost.
+    data = merged;
+    save(true, { local: true });
+    const after = flatten(data);
+    if (remote.canWrite && sig(after) !== sig(rows)) await remote.push(after);
+    if (sig(after) !== sig(before)) {
+      if (document.activeElement?.closest?.('.lists')) redrawLater = true;
+      else if (document.querySelector('.lists')) rerender();
+    }
+  } catch { /* offline or no access: try again on the next change or refresh */ }
+  finally {
+    syncing = false;
+    if (again) { again = false; scheduleSync(300); }
+  }
+}
+document.addEventListener('focusout', () => setTimeout(() => {
+  if (redrawLater && !document.activeElement?.closest?.('.lists')) { redrawLater = false; if (document.querySelector('.lists')) redraw(); }
+}, 50));

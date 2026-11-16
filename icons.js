@@ -35,6 +35,7 @@ const P = {
   calendar: '<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M8 3v4M16 3v4"/>',
   note: '<path d="M5 4h10l4 4v12H5z"/><path d="M9 12h6M9 16h4"/>',
   alert: '<path d="M12 4 3 20h18z"/><path d="M12 10v4M12 17h.01"/>',
+  user: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><circle cx="17" cy="9" r="2.6"/><path d="M16 14.2a5 5 0 0 1 5.5 4.8"/>',
 };
 
 export function icon(name, size = 22, stroke = 2) {

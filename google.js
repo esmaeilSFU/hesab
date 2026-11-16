@@ -9,12 +9,15 @@ export const GOOGLE = {
   apiKey: 'AIzaSyDk0mK8YfxHjVHp7b4B4DxW_wYNJGhYyf8', // restricted to the Picker API on esmaeilsfu.github.io
   appId: '245754808267',
   scope: 'https://www.googleapis.com/auth/drive.file',
+  // Asked for only by someone joining a budget shared with them: drive.file can't open a sheet another
+  // person shared, so joiners also allow Hesab to open their Google Sheets.
+  sheetsScope: 'https://www.googleapis.com/auth/spreadsheets',
 };
 
 // The access token is kept only in sessionStorage (this app window, cleared when it closes), never in
 // localStorage, so other pages on the same site can't read it. 'exp' in localStorage only remembers that
 // this phone signed in before, so a closed-and-reopened app can sign back in silently.
-const K = { token: 'hesab.g.token', tokenExp: 'hesab.g.tokenExp', exp: 'hesab.g.exp', state: 'hesab.g.state', sheet: 'hesab.g.sheet', after: 'hesab.g.after', silent: 'hesab.g.silentTried' };
+const K = { token: 'hesab.g.token', tokenExp: 'hesab.g.tokenExp', exp: 'hesab.g.exp', state: 'hesab.g.state', sheet: 'hesab.g.sheet', after: 'hesab.g.after', silent: 'hesab.g.silentTried', scope: 'hesab.g.scope' };
 const ss = {
   get: (k) => { try { return sessionStorage.getItem(k); } catch { return null; } },
   set: (k, v) => { try { v == null ? sessionStorage.removeItem(k) : sessionStorage.setItem(k, v); } catch {} },
@@ -36,13 +39,13 @@ export const hasToken = () => !!token();
 export const signedInBefore = () => !!ls.get(K.exp);
 
 /** Sends the browser to Google. `after` is remembered and returned by handleRedirect(). */
-export function signIn({ silent = false, after = '' } = {}) {
+export function signIn({ silent = false, after = '', sheets = false } = {}) {
   const state = crypto.getRandomValues(new Uint32Array(2)).join('-');
   ls.set(K.state, state);
   ls.set(K.after, after);
   const p = new URLSearchParams({
     client_id: GOOGLE.clientId, redirect_uri: redirectURI(), response_type: 'token',
-    scope: GOOGLE.scope, include_granted_scopes: 'true', state,
+    scope: sheets ? `${GOOGLE.scope} ${GOOGLE.sheetsScope}` : GOOGLE.scope, include_granted_scopes: 'true', state,
   });
   if (silent) p.set('prompt', 'none');
   location.assign('https://accounts.google.com/o/oauth2/v2/auth?' + p);
@@ -67,6 +70,7 @@ export function handleRedirect() {
   ls.set(K.exp, exp);
   ls.set(K.token, null); // drop a token saved by older versions
   ss.set(K.silent, null);
+  ss.set(K.scope, h.get('scope') || '');
   return { ok: true, after };
 }
 
@@ -82,8 +86,54 @@ export function signOut() {
   const t = ss.get(K.token) || ls.get(K.token);
   if (t) fetch('https://oauth2.googleapis.com/revoke?token=' + encodeURIComponent(t), { method: 'POST', mode: 'no-cors' }).catch(() => {});
   [K.token, K.exp, K.sheet, K.after].forEach((k) => ls.set(k, null));
-  [K.token, K.tokenExp].forEach((k) => ss.set(k, null));
+  [K.token, K.tokenExp, K.scope].forEach((k) => ss.set(k, null));
 }
+
+/** True when this sign-in can open any of the user's Google Sheets (needed to join a shared budget). */
+export const canOpenSharedSheets = () => (ss.get(K.scope) || '').includes(GOOGLE.sheetsScope);
+
+// ───────────── sharing (Drive permissions on the budget sheet)
+
+async function drive(path, { method = 'GET', body } = {}) {
+  const t = token();
+  if (!t) throw new ApiError('auth', 'Your Google sign-in expired.');
+  let res;
+  try {
+    res = await fetch('https://www.googleapis.com/drive/v3/' + path, {
+      method, headers: { Authorization: 'Bearer ' + t, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch { throw new ApiError('network', navigator.onLine ? 'Could not reach Google.' : 'You are offline.'); }
+  if (res.status === 401) { ss.set(K.tokenExp, String(Date.now())); throw new ApiError('auth', 'Your Google sign-in expired.'); }
+  if (res.status === 204) return {};
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const m = json.error?.message || '';
+    if (res.status === 403) throw new ApiError('access', /owner|permission|insufficient/i.test(m) ? 'Only someone who can edit this sheet can share it.' : m || 'Google refused this change.');
+    if (res.status === 400 && /email|user/i.test(m)) throw new ApiError('google', 'Google couldn\'t find an account for that email.');
+    throw new ApiError('google', m || `Google returned an error (${res.status}).`);
+  }
+  return json;
+}
+
+/** People who can open the budget sheet. */
+export async function listPeople(fileId) {
+  const r = await drive(`files/${fileId}/permissions?fields=${q('permissions(id,type,role,emailAddress,displayName)')}&supportsAllDrives=true`);
+  return (r.permissions || []).filter((p) => p.type === 'user' || p.type === 'group').map((p) => ({ id: p.id, role: p.role, email: p.emailAddress || '', name: p.displayName || '' }));
+}
+
+/** Gives a Google account access to the sheet. Google emails them the invitation, with our message and join link. */
+export function invitePerson(fileId, { email, role, message }) {
+  const qs = new URLSearchParams({ sendNotificationEmail: 'true', emailMessage: message, supportsAllDrives: 'true' });
+  return drive(`files/${fileId}/permissions?${qs}`, { method: 'POST', body: { type: 'user', role: role === 'reader' ? 'reader' : 'writer', emailAddress: email } });
+}
+
+export function removePerson(fileId, permissionId) {
+  return drive(`files/${fileId}/permissions/${permissionId}?supportsAllDrives=true`, { method: 'DELETE' });
+}
+
+/** The link that opens Hesab and joins this sheet. */
+export const joinLink = (fileId, role) => `${redirectURI()}?join=${encodeURIComponent(fileId)}${role === 'reader' ? '&view=1' : ''}`;
 
 // ───────────── chosen sheet
 
@@ -158,6 +208,7 @@ export function sheetIdFromLink(s) {
 
 const BASE = 'https://sheets.googleapis.com/v4/spreadsheets/';
 const LEDGER_HEAD = ['Timestamp', 'Date', 'Amount', 'Type', 'Expense Type', 'Category', 'Note'];
+const LISTS_HEAD = ['Kind', 'Id', 'Parent', 'Text', 'Done', 'Order', 'Updated', 'Deleted', 'Note: edited by the Hesab app'];
 
 async function call(path, { method = 'GET', body } = {}) {
   const t = token();
@@ -195,8 +246,8 @@ const q = (s) => encodeURIComponent(s);
 export class SheetsClient {
   constructor(sheet) { this.id = sheet.id; this.name = sheet.name; this.meta = null; }
 
-  async #meta() {
-    if (this.meta) return this.meta;
+  async #meta(fresh = false) {
+    if (this.meta && !fresh) return this.meta;
     const m = await call(`${this.id}?fields=properties(title,timeZone),sheets(properties(sheetId,title))`);
     const tabs = Object.fromEntries(m.sheets.map((s) => [s.properties.title, s.properties.sheetId]));
     for (const need of ['Ledger', 'Categories', 'Budget']) {
@@ -331,6 +382,28 @@ export class SheetsClient {
   setPlan(category, monthlyPlan) { return this.#budgetCell(category, 'C', monthlyPlan); }
   /** Column D: the day of the month a bill or income is added by itself (blank = off). */
   setRepeat(category, value) { return this.#budgetCell(category, 'D', value || ''); }
+
+  // ───── shopping lists, kept in a "Lists" tab so everyone on the budget sees them
+
+  /** Rows of the Lists tab (no tab yet = no rows). */
+  async readLists() {
+    const meta = await this.#meta(true);
+    if (!('Lists' in meta.tabs)) return [];
+    const r = await call(`${this.id}/values/${q('Lists!A2:I')}?valueRenderOption=UNFORMATTED_VALUE`);
+    return r.values || [];
+  }
+
+  /** Replaces the Lists tab with these rows, creating the tab the first time. */
+  async writeLists(rows) {
+    const meta = await this.#meta(true);
+    if (!('Lists' in meta.tabs)) {
+      await call(`${this.id}:batchUpdate`, { method: 'POST', body: { requests: [{ addSheet: { properties: { title: 'Lists', gridProperties: { rowCount: 1000, columnCount: 9, frozenRowCount: 1 } } } }] } });
+      this.meta = null;
+      await call(`${this.id}/values/${q('Lists!A1:I1')}?valueInputOption=RAW`, { method: 'PUT', body: { values: [LISTS_HEAD] } });
+    }
+    await call(`${this.id}/values:batchClear`, { method: 'POST', body: { ranges: ['Lists!A2:I'] } });
+    if (rows.length) await call(`${this.id}/values/${q(`Lists!A2:I${rows.length + 1}`)}?valueInputOption=RAW`, { method: 'PUT', body: { values: rows } });
+  }
 
   /** Only for sheets Hesab created: rewrites Categories and Budget, and renames categories in the Ledger. */
   async saveCategories(snapshot, renames = {}) {
