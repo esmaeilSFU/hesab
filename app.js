@@ -753,7 +753,7 @@ function weekView() {
   <section class="card week-overview">
     <div class="week-summary">
     <div class="hero-ring">${chart.ring(progress)}
-      <div class="ring-c">${available > 0 ? `<b>${Math.round(Math.min(progress, 9.99) * 100)}%</b><span>used</span>` : `<b>—</b><span>no room</span>`}</div>
+        <div class="ring-c">${available > 0 ? `<b>${Math.round(Math.min(progress, 1) * 100)}%</b><span>used</span>` : `<b>-</b><span>no room</span>`}</div>
     </div>
     <div class="hero-txt">
       <span class="pill ${tone}">${icon(tone === 'good' ? 'check' : 'alert', 12, 2.6)}${statusText}</span>
