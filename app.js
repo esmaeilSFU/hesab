@@ -750,7 +750,8 @@ function weekView() {
   ${isDemo() ? demoBanner() : ''}
   ${estimatedBanner()}
 
-  <section class="card hero">
+  <section class="card week-overview">
+    <div class="week-summary">
     <div class="hero-ring">${chart.ring(progress)}
       <div class="ring-c">${available > 0 ? `<b>${Math.round(Math.min(progress, 9.99) * 100)}%</b><span>used</span>` : `<b>—</b><span>no room</span>`}</div>
     </div>
@@ -762,14 +763,15 @@ function weekView() {
       ${perDay > 0 ? `<span class="sub em">≈ ${money(perDay, { cents: false })} a day · ${daysLeft} day${daysLeft > 1 ? 's' : ''} left</span>` : ''}
       ${carried < -0.5 ? `<span class="sub warnTxt">${money(carried, { cents: false })} carried from last week</span>` : ''}
     </div>
+    </div>
+    <div class="week-pace">
+      <div class="card-h"><h2>Pace</h2><span class="legend"><i class="lg-line"></i>Spent <i class="lg-dash"></i>Even pace</span></div>
+      ${chart.paceChart(e.pace(w))}
+    </div>
   </section>
 
   ${guideCard(weekGuide(w))}
 
-  <section class="card">
-    <div class="card-h"><h2>Pace</h2><span class="legend"><i class="lg-line"></i>Spent <i class="lg-dash"></i>Even pace</span></div>
-    ${chart.paceChart(e.pace(w))}
-  </section>
 
   <section class="card list">
     <div class="card-h"><h2>Categories</h2><span class="muted">${lines.filter((l) => l.remaining < 0).length ? `${lines.filter((l) => l.remaining < 0).length} over` : 'All good'}</span></div>
