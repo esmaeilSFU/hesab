@@ -658,8 +658,9 @@ function render() {
   renderChrome();
   document.body.classList.toggle('on-lists', state.tab === 'lists');
   document.body.classList.toggle('view-only', isViewOnly());
-  const html = state.tab === 'activity' ? activityView() : state.tab === 'lists' ? lists.view(header) : insightsView();
-  view().innerHTML = html;
+  const html = state.tab === 'activity' ? activityView() : state.tab === 'lists' ? lists.view(header) : state.tab === 'settings' ? null : insightsView();
+  if (state.tab === 'settings') settingsSheet({ asPage: true });
+  else view().innerHTML = html;
   view().dataset.tab = state.tab;
   renderInstallBanner();
 }
@@ -692,7 +693,6 @@ function header(title, subtitle, { extra = '' } = {}) {
       <div class="hdr-actions">
         ${extra}
         ${!api() ? '' : `<button class="icon-btn" id="syncBtn" data-act="sync" aria-label="Refresh">${icon('sync', 19)}</button>`}
-        <button class="icon-btn" data-act="settings" aria-label="Settings">${icon('gear', 20)}</button>
       </div>
     </div>
     <div class="hdr-title">
@@ -820,9 +820,6 @@ function insightsView() {
   ${body}
   ${period === 'month' ? estimatedBanner(state.engine.month(state.month || state.engine.currentMonth).ym) : ''}
   ${isDemo() ? demoBanner() : ''}
-  <div class="insight-secondary" aria-label="More insights">
-    <button class="link" data-act="insights" data-m="trends" aria-pressed="${state.insights === 'trends'}">Trends</button>
-    <button class="link" data-act="insights" data-m="year" aria-pressed="${state.insights === 'year'}">Year</button>
   </div>`;
 }
 
@@ -1555,7 +1552,7 @@ function enableReorder(list, onDone) {
 const KIND_LABEL = { variable: 'Spending', fixed: 'Bill', invest: 'Invest', income: 'Income' };
 const KIND_GROUP = { variable: 'Weekly spending', fixed: 'Bill', invest: 'Invest', income: 'Income' };
 
-function settingsSheet({ showConnect = false } = {}) {
+function settingsSheet({ showConnect = false, asPage = state.tab === 'settings' } = {}) {
   const e = state.engine, m = mode();
   const editable = canEditCategories(), local = isLocal();
   const cats = categories();
@@ -1597,8 +1594,8 @@ function settingsSheet({ showConnect = false } = {}) {
   }).join('');
 
   const html = `
-    <div class="sheet-h"><span style="width:56px"></span><b>Settings</b><button class="txt-btn" data-close>Done</button></div>
-    <div class="sheet-scroll">
+    ${asPage ? '<header class="hdr settings-header"><div class="hdr-row"><div><p class="eyebrow">YOUR BUDGET</p><h1>You</h1></div></div></header>' : '<div class="sheet-h"><span style="width:56px"></span><b>Settings</b><button class="txt-btn" data-close>Done</button></div>'}
+    <div class="${asPage ? 'settings-scroll' : 'sheet-scroll'}">
       <h3 class="grp">Where your data lives</h3>
       <div class="card src-list">
         ${sourceRow('local', 'On this device', 'Free and private. No account needed.', 'phone')}
@@ -1662,9 +1659,7 @@ function settingsSheet({ showConnect = false } = {}) {
       <div class="about"><img class="light-only" src="hesab-lockup-dark.svg" alt="Hesab"><img class="dark-only" src="hesab-lockup-light.svg" alt="Hesab"><span>Version ${esc(track.VERSION)}</span></div>
     </div>`;
 
-  openSheet(html, {
-    cls: 'tall',
-    onMount(wrap) {
+  const onMount = (wrap) => {
       wrap.querySelectorAll('[data-src]').forEach((b) => b.addEventListener('click', () => {
         const target = b.dataset.src;
         if (target === m) return;
@@ -1770,8 +1765,13 @@ function settingsSheet({ showConnect = false } = {}) {
         [LS.url, LS.token, LS.cache, LS.synced, LS.mode, LS.queue].forEach((k) => store.set(k, null));
         state.synced = null; state.snapshot = null; state.engine = null; closeSheet(); render();
       });
-    },
-  });
+    };
+  if (asPage) {
+    view().innerHTML = html;
+    onMount(view());
+  } else {
+    openSheet(html, { cls: 'tall', onMount });
+  }
 }
 
 /** Average times per month an amount happens (weekly items ≈ 4.33, every 2 weeks ≈ 2.17). */
@@ -1947,7 +1947,7 @@ document.addEventListener('click', (ev) => {
   const act = t.dataset.act, e = state.engine;
   if (!e && !['start', 'sample', 'connectSheet', 'connectGoogle', 'installGuide', 'shareLink'].includes(act)) return;
   switch (act) {
-    case 'settings': settingsSheet(); break;
+    case 'settings': state.tab = 'settings'; render(); window.scrollTo({ top: 0 }); break;
     case 'welcome': store.set(LS.mode, null); state.snapshot = null; state.engine = null; render(); window.scrollTo({ top: 0 }); break;
     case 'start': startFresh(); break;
     case 'installGuide': installSheet(); break;
@@ -1955,7 +1955,7 @@ document.addEventListener('click', (ev) => {
     case 'dismissInstall': install.dismissBanner(); renderInstallBanner(); break;
     case 'shareLink': install.shareLink().then((r) => r === 'copied' && toast('Link copied')); break;
     case 'sample': useMode('demo', demoSnapshot()); break;
-    case 'connectSheet': setSnapshot(starterSnapshot()); settingsSheet({ showConnect: true }); break;
+    case 'connectSheet': setSnapshot(starterSnapshot()); state.tab = 'settings'; render(); settingsSheet({ showConnect: true, asPage: true }); window.scrollTo({ top: 0 }); break;
     case 'connectGoogle': if (!state.engine) setSnapshot(starterSnapshot()); googleSheetChooser(); break;
     case 'gsignin': g.signIn({ after: 'sync' }); break;
     case 'sync': refresh(); break;

@@ -309,6 +309,10 @@ main#view {
 .txt-btn.bad { color: var(--bad); }
 .txt-btn.center { display: block; margin: 12px auto 0; text-align: center; }
 .sheet-scroll { overflow-y: auto; flex: 1; margin: 0 -16px; padding: 0 16px 20px; -webkit-overflow-scrolling: touch; }
+.settings-header { padding: 6px 2px 4px; }
+.settings-header h1 { font-size: 30px; }
+.settings-scroll { display: flex; flex-direction: column; gap: 0; padding-bottom: 20px; -webkit-overflow-scrolling: touch; }
+main#view[data-tab="settings"] { gap: 10px; }
 
 /* entry */
 .amount { display: flex; justify-content: center; align-items: flex-start; gap: 2px; font-size: 56px; font-weight: 700; letter-spacing: -.03em; padding: 4px 0 10px; }
@@ -639,7 +643,7 @@ body.view-only .fab { display: none; }
 .period-ring { position: relative; flex: none; width: 92px; height: 92px; }
 .period-ring .ring { display: block; width: 100%; height: 100%; }
 .period-ring-label { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.1; }
-.period-ring-label b { font-size: 20px; font-weight: 700; }
+.period-ring-label b { font-size: 13.33px; font-weight: 700; }
 .period-ring-label span { color: var(--text-secondary); font-size: 11px; margin-top: 3px; }
 .period-copy { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; }
 .period-copy > * { max-width: 100%; overflow-wrap: anywhere; }
@@ -684,9 +688,9 @@ main#view[data-tab="insights"] { gap: 10px; }
 .pace-over path { fill: none; stroke: var(--bad); stroke-width: 1; stroke-dasharray: 2 2; opacity: .72; }
 .pace-over circle { fill: var(--bad); stroke: var(--surface); stroke-width: 1; }
 .pace-over text { fill: var(--bad); font-size: 10px; font-weight: 700; paint-order: stroke; stroke: var(--surface); stroke-width: 4; stroke-linejoin: round; }
-.category-chart { display: grid; grid-template-columns: repeat(var(--columns), minmax(0, 1fr)); gap: 6px; }
+.category-chart { display: grid; grid-template-columns: repeat(var(--columns), minmax(0, 1fr)); gap: 4px; width: 100%; min-width: 0; overflow: visible; }
 .category-column { display: grid; grid-template-rows: 75px auto; gap: 5px; padding-top: 14px; text-align: center; font-size: 11px; min-width: 0; }
-.category-column span { color: var(--muted); line-height: 1.15; overflow-wrap: anywhere; }
+.category-column > span:not(.chart-sr) { color: var(--muted); line-height: 1.15; overflow-wrap: anywhere; }
 .category-column small { display: block; margin-top: 2px; font-size: 10px; }
 .category-track { position: relative; border-bottom: 1px solid var(--line); }
 .category-spent { position: absolute; bottom: 0; left: 30%; width: 40%; height: var(--height); border-radius: 3px 3px 0 0; background: var(--spend); }
@@ -717,9 +721,16 @@ main#view[data-tab="insights"] { gap: 10px; }
   .period-overview { padding: 12px; }
   .period-summary { gap: 10px; }
   .period-ring { width: 80px; height: 80px; }
-  .period-ring-label b { font-size: 18px; }
+  .period-ring-label b { font-size: 12px; }
   .period-amount { font-size: 25px; }
   [data-tab="insights"] .brand { gap: 5px; }
   [data-tab="insights"] .hdr-actions { gap: 4px; }
   [data-tab="insights"] .eyebrow { overflow-wrap: anywhere; }
+}
+@media (max-width: 480px) {
+  .category-chart { gap: 2px; }
+  .category-column { grid-template-rows: 68px 96px; gap: 3px; font-size: 9px; }
+  .category-column > span:not(.chart-sr) { writing-mode: vertical-rl; transform: rotate(180deg); justify-self: center; align-self: start; white-space: nowrap; }
+  .category-column small { display: none; }
+  .category-amount { font-size: 8px; }
 }

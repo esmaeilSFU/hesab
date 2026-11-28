@@ -78,7 +78,7 @@ export function weekCategories(lines) {
   const visible = lines.filter((line) => line.spent || line.target || line.carried);
   if (!visible.length) return '<p class="empty">No spending or targets for this week.</p>';
   const max = Math.max(1, ...visible.map((line) => Math.max(line.spent, line.target, line.available)));
-  return `<div class="category-chart" style="--columns:${Math.min(7, visible.length)}">
+  return `<div class="category-chart" style="--columns:${visible.length}">
     ${visible.map((line) => {
       const target = Math.max(0, line.available);
       const label = line.category.name;
