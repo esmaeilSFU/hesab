@@ -198,11 +198,12 @@ export class Engine {
   // ---- calendar months (exactly the 1st to the last day) ----
   /** Spending, bills and income for one calendar month (1–12). Spending targets are the weekly
    *  targets scaled to the month's length: weekly × days ÷ 7. */
-  month(m) {
-    const ym = `${this.year}-${pad(m)}`;
-    const days = new Date(this.year, m, 0).getDate();
+  month(m, year = this.year, through = null) {
+    const ym = `${year}-${pad(m)}`;
+    const days = new Date(year, m, 0).getDate();
     const first = `${ym}-01`, last = `${ym}-${pad(days)}`;
-    const spent = {}, daily = new Array(days).fill(0);
+    const spent = Object.create(null), daily = new Array(days).fill(0);
+    const dailyByCategory = new Map();
     let income = 0, fixed = 0, invest = 0, count = 0;
     for (const t of this.transactions) {
       if (!t.date || t.date.slice(0, 7) !== ym) continue;
@@ -211,14 +212,20 @@ export class Engine {
       else if (isFixed(t)) fixed += t.amount;
       else if (isInvest(t)) invest += t.amount;
       else if (isVariable(t)) {
+        if (through && t.date > through) { count--; continue; }
+        const index = Number(t.date.slice(8, 10)) - 1;
         spent[t.category] = (spent[t.category] || 0) + t.amount;
-        daily[Number(t.date.slice(8, 10)) - 1] += t.amount;
+        if (!dailyByCategory.has(t.category)) dailyByCategory.set(t.category, new Array(days).fill(0));
+        dailyByCategory.get(t.category)[index] += t.amount;
       }
     }
     const lines = this.variable.map((c) => ({ category: c, spent: spent[c.name] || 0, target: ((this.targets[c.name] || 0) * days) / 7 }));
+    for (const line of lines) {
+      dailyByCategory.get(line.category.name)?.forEach((amount, i) => { daily[i] += amount; });
+    }
     const variableSpent = lines.reduce((s, l) => s + l.spent, 0);
     const variableTarget = lines.reduce((s, l) => s + l.target, 0);
-    return { month: m, ym, first, last, days, daily, count, lines, income, fixed, invest, variableSpent, variableTarget, net: income - variableSpent - fixed - invest };
+    return { month: m, ym, first, last, days, daily, dailyByCategory, count, lines, income, fixed, invest, variableSpent, variableTarget, net: income - variableSpent - fixed - invest };
   }
   get currentMonth() {
     const t = todayISO();

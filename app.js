@@ -27,10 +27,12 @@ const store = {
 const state = {
   snapshot: null,
   engine: null,
-  tab: 'week',
+  tab: 'insights',
   week: 1,
   month: 0,
   insights: 'month',
+  insightCarry: store.get('hesab.insightCarry') === '1',
+  monthCarry: store.get('hesab.monthCarry') === '1',
   filter: 'all',
   search: '',
   syncing: false,
@@ -656,7 +658,7 @@ function render() {
   renderChrome();
   document.body.classList.toggle('on-lists', state.tab === 'lists');
   document.body.classList.toggle('view-only', isViewOnly());
-  const html = state.tab === 'week' ? weekView() : state.tab === 'activity' ? activityView() : state.tab === 'lists' ? lists.view(header) : insightsView();
+  const html = state.tab === 'activity' ? activityView() : state.tab === 'lists' ? lists.view(header) : insightsView();
   view().innerHTML = html;
   view().dataset.tab = state.tab;
   renderInstallBanner();
@@ -677,7 +679,7 @@ function installSheet() {
     ${install.installGuideHTML()}`);
 }
 
-function header(title, subtitle, { nav = false } = {}) {
+function header(title, subtitle, { extra = '' } = {}) {
   const synced = isDemo() ? 'Sample data' : isLocal() ? 'On this device' : state.synced ? `Synced ${timeAgo(state.synced)}` : 'Not synced yet';
   const pend = isGoogle() ? pendingCount() : 0;
   const needSignIn = isGoogle() && !g.hasToken();
@@ -688,17 +690,16 @@ function header(title, subtitle, { nav = false } = {}) {
     <div class="hdr-row">
       <span class="brand"><img src="hesab-icon.svg" alt="Hesab" width="28" height="28"><span class="eyebrow">${pill || esc(synced)}</span></span>
       <div class="hdr-actions">
+        ${extra}
         ${!api() ? '' : `<button class="icon-btn" id="syncBtn" data-act="sync" aria-label="Refresh">${icon('sync', 19)}</button>`}
         <button class="icon-btn" data-act="settings" aria-label="Settings">${icon('gear', 20)}</button>
       </div>
     </div>
     <div class="hdr-title">
-      ${nav ? `<button class="chev" data-act="prevWeek" aria-label="Previous week" ${state.week <= 1 ? 'disabled' : ''}>${icon('left', 20, 2.4)}</button>` : ''}
-      <div class="titles" ${nav ? 'data-act="thisWeek"' : ''}>
+      <div class="titles">
         <h1>${esc(title)}</h1>
         ${subtitle ? `<p>${subtitle}</p>` : ''}
       </div>
-      ${nav ? `<button class="chev" data-act="nextWeek" aria-label="Next week" ${state.week >= state.engine.weeks ? 'disabled' : ''}>${icon('right', 20, 2.4)}</button>` : ''}
     </div>
   </header>`;
 }
@@ -730,60 +731,6 @@ const newestFirst = () => [...state.snapshot.transactions].sort((a, b) =>
 
 // ───────────────────────────────────────────── Week
 
-function weekView() {
-  const e = state.engine, w = state.week;
-  const lines = e.lines(w), sum = e.summary(w), days = e.daysOf(w);
-  const isCurrent = w === e.currentWeek;
-  // Overspending carried in from last week shrinks this week's room, so the ring uses it too.
-  const available = sum.available;
-  const progress = available > 0 ? sum.spent / available : 2;
-  const daysLeft = isCurrent ? days.filter((d) => d >= todayISO()).length : 0;
-  const perDay = daysLeft ? Math.max(0, sum.remaining) / daysLeft : 0;
-  const carried = lines.reduce((s, l) => s + l.carried, 0);
-  const recent = newestFirst().filter((t) => days.includes(t.date)).slice(0, 5);
-
-  const tone = sum.remaining < 0 ? 'bad' : progress > 0.85 ? 'warn' : 'good';
-  const statusText = sum.remaining < 0 ? 'Over budget' : progress > 0.85 ? 'Almost there' : 'On track';
-
-  return `
-  ${header(isCurrent ? 'This Week' : `Week ${w}`, `${isCurrent ? `Week ${w} · ` : ''}${weekRange(days)}`, { nav: true })}
-  ${isDemo() ? demoBanner() : ''}
-  ${estimatedBanner()}
-
-  <section class="card week-overview">
-    <div class="week-summary">
-    <div class="hero-ring">${chart.ring(progress)}
-        <div class="ring-c">${available > 0 ? `<b>${Math.round(Math.min(progress, 1) * 100)}%</b><span>used</span>` : `<b>-</b><span>no room</span>`}</div>
-    </div>
-    <div class="hero-txt">
-      <span class="pill ${tone}">${icon(tone === 'good' ? 'check' : 'alert', 12, 2.6)}${statusText}</span>
-      <span class="lbl">${sum.remaining < 0 ? 'Over by' : 'Left to spend'}</span>
-      <span class="big">${money(Math.abs(sum.remaining), { cents: false })}</span>
-      <span class="sub">${money(sum.spent, { cents: false })} spent of ${money(Math.max(0, available), { cents: false })}</span>
-      ${perDay > 0 ? `<span class="sub em">≈ ${money(perDay, { cents: false })} a day · ${daysLeft} day${daysLeft > 1 ? 's' : ''} left</span>` : ''}
-      ${carried < -0.5 ? `<span class="sub warnTxt">${money(carried, { cents: false })} carried from last week</span>` : ''}
-    </div>
-    </div>
-    <div class="week-pace">
-      <div class="card-h"><h2>Pace</h2><span class="legend"><i class="lg-line"></i>Spent <i class="lg-dash"></i>Even pace</span></div>
-      ${chart.paceChart(e.pace(w))}
-    </div>
-  </section>
-
-  ${guideCard(weekGuide(w))}
-
-
-  <section class="card list">
-    <div class="card-h"><h2>Categories</h2><span class="muted">${lines.filter((l) => l.remaining < 0).length ? `${lines.filter((l) => l.remaining < 0).length} over` : 'All good'}</span></div>
-    ${lines.map((l) => catLine(l, [days[0], days.at(-1)])).join('')}
-  </section>
-
-  <section class="card list">
-    <div class="card-h"><h2>${isCurrent ? 'Latest' : 'This week'}</h2>${recent.length ? `<button class="link" data-act="tab" data-tab="activity">See all</button>` : ''}</div>
-    ${recent.length ? recent.map((t) => txRow(t, { date: true })).join('') : `<p class="empty">${state.snapshot.transactions.length ? 'Nothing spent this week yet.' : 'Tap + to add your first expense.'}</p>`}
-  </section>`;
-}
-
 function catLine(l, range = null) {
   const avail = l.available;
   const ratio = avail > 0 ? Math.min(1, l.spent / avail) : l.spent > 0 ? 1 : 0;
@@ -801,10 +748,9 @@ function catLine(l, range = null) {
   </${tag}>`;
 }
 
-function estimatedBanner() {
-  const est = state.snapshot.transactions.filter(isEstimated);
+function estimatedBanner(ym) {
+  const est = state.snapshot.transactions.filter((entry) => isEstimated(entry) && entry.date.slice(0, 7) === ym);
   if (!est.length) return '';
-  const ym = est.map((t) => t.date.slice(0, 7)).sort()[0];
   const names = [...new Set(est.map((t) => t.category))];
   return `<button class="card demo est-banner" data-act="reviewEst" data-ym="${ym}">
     <span class="demo-ic">${icon('alert', 20)}</span>
@@ -862,14 +808,106 @@ function groupsHTML(groups) {
 // ───────────────────────────────────────────── Insights
 
 function insightsView() {
-  const seg = [['trends', 'Trends'], ['month', 'Month'], ['year', 'Year']];
-  const views = { trends: insightsTrends, month: insightsMonth, year: insightsYear };
-  if (!views[state.insights]) state.insights = 'month';
-  const body = views[state.insights]();
+  const period = ['week', 'month'].includes(state.insights) ? state.insights : '';
+  const views = { trends: insightsTrends, month: insightsMonth, year: insightsYear, week: insightsWeek };
+  const body = (views[state.insights] || insightsMonth)();
+  const carry = period === 'month' ? state.monthCarry : state.insightCarry;
   return `
-  ${header('Insights', `${state.engine.year}`)}
-  <div class="seg">${seg.map(([k, l]) => `<button class="${state.insights === k ? 'on' : ''}" data-act="insights" data-m="${k}">${l}</button>`).join('')}</div>
-  ${body}`;
+  ${header('Insights', `${state.engine.year}`, { extra: period ? `<button class="carry-switch" data-act="carry" data-period="${period}" role="switch" aria-checked="${carry}"><span>Carry over</span><i aria-hidden="true"></i></button>` : '' })}
+  <div class="seg insight-period" aria-label="Insights period">
+    ${[['week', 'Week'], ['month', 'Month']].map(([k, l]) => `<button class="${period === k ? 'on' : ''}" data-act="insights" data-m="${k}" aria-pressed="${period === k}">${l}</button>`).join('')}
+  </div>
+  ${body}
+  ${period === 'month' ? estimatedBanner(state.engine.month(state.month || state.engine.currentMonth).ym) : ''}
+  ${isDemo() ? demoBanner() : ''}
+  <div class="insight-secondary" aria-label="More insights">
+    <button class="link" data-act="insights" data-m="trends" aria-pressed="${state.insights === 'trends'}">Trends</button>
+    <button class="link" data-act="insights" data-m="year" aria-pressed="${state.insights === 'year'}">Year</button>
+  </div>`;
+}
+
+function insightsWeek() {
+  const e = state.engine, w = state.week;
+  const days = e.daysOf(w);
+  const today = todayISO();
+  const dayIndexes = new Map(days.map((day, index) => [day, index]));
+  const baseLines = e.lines(w);
+  const budgets = new Map(baseLines.map((line) => [line.category.name, new Array(days.length).fill(0)]));
+  const transactions = newestFirst().filter((entry) => dayIndexes.has(entry.date) && entry.date <= today);
+  const daily = new Array(days.length).fill(0);
+  for (const entry of transactions) {
+    const categoryDays = budgets.get(entry.category);
+    if (!categoryDays || !isVariable(entry)) continue;
+    const index = dayIndexes.get(entry.date);
+    categoryDays[index] += entry.amount;
+    daily[index] += entry.amount;
+  }
+  const lines = baseLines.map((line) => {
+    const carried = state.insightCarry ? line.carried : 0;
+    const available = line.target + carried;
+    const spent = budgets.get(line.category.name).reduce((total, amount) => total + amount, 0);
+    return { ...line, spent, carried, available, remaining: available - spent };
+  });
+  const sum = lines.reduce((total, line) => {
+    total.spent += line.spent;
+    total.available += line.available;
+    total.remaining += line.remaining;
+    return total;
+  }, { spent: 0, available: 0, remaining: 0 });
+  let cumulative = 0;
+  const pace = days.map((day, i) => {
+    cumulative += daily[i];
+    return { day, cumulative, ideal: (Math.max(0, sum.available) * (i + 1)) / days.length, future: day > today };
+  });
+  const available = Math.max(0, sum.available);
+  const progress = available ? sum.spent / available : 0;
+  const left = sum.remaining;
+  const isCurrent = days.includes(today);
+  const elapsed = days.filter((day) => day <= today).length;
+  const daysLeft = elapsed ? days.length - elapsed : 0;
+  const forecast = daysLeft ? sum.spent * days.length / elapsed : null;
+  const recent = transactions.slice(0, 5);
+  const over = lines.filter((line) => line.remaining < -0.005).sort((a, b) => a.remaining - b.remaining);
+  const markers = paceOverMarkers(over, budgets);
+  const status = periodStatus(left, elapsed, daysLeft, forecast, sum.available);
+  const carried = -lines.reduce((n, l) => n + Math.min(0, l.carried), 0);
+  return `
+  <div class="stepper">
+    <button class="chev" data-act="prevWeek" ${w <= 1 ? 'disabled' : ''} aria-label="Previous week">${icon('left', 20, 2.4)}</button>
+    <div><b>${isCurrent ? 'This Week' : `Week ${w}`}</b><span>${weekRange(days)} · Mon–Sun</span></div>
+    <button class="chev" data-act="nextWeek" ${w >= e.weeks ? 'disabled' : ''} aria-label="Next week">${icon('right', 20, 2.4)}</button>
+  </div>
+  <section class="card period-overview week-insights-overview period-${status.tone}">
+    <div class="period-summary">
+      <div class="period-ring">${chart.ring(progress, 92, 10)}<div class="period-ring-label"><b>${available > 0 ? Math.round(progress * 100) + '%' : '–'}</b><span>${available > 0 ? 'used' : 'no target'}</span></div></div>
+      <div class="period-copy">
+        ${statusPill(status)}
+        <span class="lbl">${left < 0 ? 'Over by' : 'Left to spend'}</span>
+        <div class="period-value"><strong class="period-amount">${usd(Math.abs(left))}</strong>${daysLeft ? `<span class="sub">${daysLeft} day${daysLeft === 1 ? '' : 's'} left</span>` : ''}</div>
+        <span class="sub">${money(sum.spent, { cents: false })} spent of ${money(available, { cents: false })}</span>
+        ${carried > 0.005 ? `<span class="sub carry-note">${usd(-carried)} carried from last week</span>` : ''}
+      </div>
+    </div>
+    <div class="period-chart">
+      ${paceHeading(daysLeft > 0, markers.length > 0)}
+      ${chart.paceChart(pace, { forecast, markers })}
+    </div>
+  </section>
+  <section class="card period-categories">
+    <div class="card-h"><h2>By category</h2><span class="legend"><i class="lg-square"></i>Spent <i class="lg-dash"></i>Weekly target
+      ${carried > 0.005 ? '<i class="lg-adjusted"></i>Adj.' : ''}</span></div>
+    ${chart.weekCategories(lines)}
+    <p class="hint">Bars show this week’s spending.${carried > 0.005 ? ' Amber shows the target after carry over.' : ''}</p>
+  </section>
+  ${guideCard(weekGuide(lines, over, { elapsed, daysLeft, forecast, ...sum }))}
+  <section class="card list">
+    <div class="card-h"><h2>Over / under target</h2><span class="muted">${over.length ? `${over.length} over` : 'All on track'}</span></div>
+    ${lines.map((l) => catLine(l, [days[0], days.at(-1)])).join('')}
+  </section>
+  <section class="card list">
+    <div class="card-h"><h2>Weekly activity</h2><button class="link" data-act="tab" data-tab="activity">See all</button></div>
+    ${recent.length ? recent.map((transaction) => txRow(transaction, { date: true })).join('') : '<p class="empty">No entries this week.</p>'}
+  </section>`;
 }
 
 function insightsTrends() {
@@ -926,34 +964,74 @@ const usd = (v) => money(v, { cents: false });
 function insightsMonth() {
   const e = state.engine;
   const m = state.month || e.currentMonth;
-  const mo = e.month(m);
-  const items = mo.lines.map((l) => ({ category: l.category.name, amount: l.spent })).filter((i) => i.amount > 0).sort((a, c) => c.amount - a.amount);
   const today = todayISO();
+  const mo = e.month(m, e.year, today);
+  const previous = state.monthCarry ? (m === 1 ? e.month(12, e.year - 1) : e.month(m - 1)) : null;
+  const priorDeficits = new Map(previous?.lines.map((line) => [line.category.name, Math.min(0, line.target - line.spent)]));
+  const lines = mo.lines.map((line) => {
+    const carried = priorDeficits.get(line.category.name) ?? 0;
+    const available = line.target + carried;
+    return { ...line, carried, available, remaining: available - line.spent };
+  });
+  const carried = -lines.reduce((sum, line) => sum + line.carried, 0);
+  const target = mo.variableTarget - carried;
+  const available = Math.max(0, target);
+  const items = mo.lines.map((l) => ({ category: l.category.name, amount: l.spent })).filter((i) => i.amount > 0).sort((a, c) => c.amount - a.amount);
   const elapsed = today < mo.first ? 0 : today > mo.last ? mo.days : Number(today.slice(8, 10));
+  const progress = available > 0 ? mo.variableSpent / available : 0;
+  const monthLeft = target - mo.variableSpent;
+  const daysLeft = elapsed > 0 ? mo.days - elapsed : 0;
+  const forecast = elapsed > 0 ? mo.variableSpent * mo.days / elapsed : null;
+  const status = periodStatus(monthLeft, elapsed, daysLeft, forecast, target);
+  const over = lines.filter((line) => line.remaining < -0.005).sort((a, b) => a.remaining - b.remaining);
+  const markers = paceOverMarkers(over, mo.dailyByCategory);
+  let cumulative = 0;
+  const pace = mo.daily.map((amount, i) => {
+    const day = addDays(mo.first, i);
+    cumulative += amount;
+    return { day, cumulative, ideal: available * (i + 1) / mo.days, future: day > today };
+  });
   return `
   <div class="stepper">
     <button class="chev" data-act="prevMonth" ${m <= 1 ? 'disabled' : ''} aria-label="Previous month">${icon('left', 20, 2.4)}</button>
     <div><b>${monthName(m)} ${e.year}</b><span>${shortDate(mo.first)} – ${shortDate(mo.last)} · ${mo.days} days</span></div>
     <button class="chev" data-act="nextMonth" ${m >= 12 ? 'disabled' : ''} aria-label="Next month">${icon('right', 20, 2.4)}</button>
   </div>
-  ${mo.count ? leftCard(mo, e.monthVsPlan(mo.ym), elapsed) : ''}
-  ${guideCard(monthGuide(m), elapsed && elapsed < mo.days ? `Day ${elapsed} of ${mo.days}` : '')}
+  <section class="card period-overview month-overview month-${status.tone}">
+    <div class="card-h"><h2>${monthName(m)} pace</h2></div>
+    <div class="period-summary">
+      <div class="period-ring">${chart.ring(progress, 92, 10, 'var(--good)')}<div class="period-ring-label"><b>${available > 0 ? Math.round(progress * 100) + '%' : '–'}</b><span>${available > 0 ? 'used' : 'no room'}</span></div></div>
+      <div class="period-copy">
+        <span class="lbl">${monthLeft < 0 ? 'Over by' : 'Left this month'}</span>
+        <div class="period-value"><strong class="period-amount">${usd(Math.abs(monthLeft))}</strong>${daysLeft ? `<span class="sub">${daysLeft} day${daysLeft === 1 ? '' : 's'} left</span>` : ''}</div>
+        <span class="sub">${usd(mo.variableSpent)} spent of ${usd(available)}</span>
+        ${statusPill(status, 'month-status')}
+        ${carried > 0.5 ? `<span class="sub carry-note">${usd(carried)} carried from ${monthName(previous.month)}</span>` : ''}
+      </div>
+    </div>
+    <div class="period-chart">
+      ${paceHeading(daysLeft > 0, markers.length > 0)}
+      ${chart.paceChart(pace, { monthly: true, forecast: daysLeft ? forecast : null, markers })}
+    </div>
+  </section>
   <section class="card">
     <div class="card-h"><h2>Day by day</h2><span class="legend"><i style="background:var(--spend)"></i>Spending <i class="lg-dash"></i>Daily budget</span></div>
-    ${chart.dayBars(mo.daily, e.weeklyTargetTotal / 7, mo.first)}
+    ${chart.dayBars(mo.daily, available / mo.days, mo.first)}
   </section>
-  ${planCard(mo.ym)}
+  ${guideCard(monthGuide(mo, lines, { target, elapsed, daysLeft, forecast, today }), elapsed && elapsed < mo.days ? `Day ${elapsed} of ${mo.days}` : '')}
+  <section class="card list">
+    <div class="card-h"><h2>Over / under target</h2><span class="muted">${over.length ? `${over.length} over` : 'All on track'}</span></div>
+    ${lines.map((line) => catLine(line, [mo.first, mo.last])).join('')}
+  </section>
   <section class="card">
-    <div class="card-h"><h2>Where it went</h2><span class="muted">${usd(mo.variableSpent)} of ${usd(mo.variableTarget)}</span></div>
+    <div class="card-h"><h2>Where it went</h2><span class="muted">${usd(mo.variableSpent)} of ${usd(available)}</span></div>
     ${items.length ? `<div class="donut-row">
       ${chart.donut(items)}
       <ul class="legend-list">${items.slice(0, 6).map((i) => `<li><i style="background:${catStyle(i.category).color}"></i><span>${esc(i.category)}</span><b>${Math.round((100 * i.amount) / (mo.variableSpent || 1))}%</b></li>`).join('')}</ul>
     </div>` : '<p class="empty">No spending logged this month.</p>'}
   </section>
-  <section class="card list">
-    <div class="card-h"><h2>Budget vs actual</h2><span class="muted">Weekly targets × ${mo.days} days</span></div>
-    ${mo.lines.map((l) => catLine({ category: l.category, spent: l.spent, target: l.target, carried: 0, available: l.target, remaining: l.target - l.spent }, [mo.first, mo.last])).join('')}
-  </section>`;
+  ${planCard(mo.ym)}
+  ${mo.count ? leftCard(mo, e.monthVsPlan(mo.ym), elapsed, forecast) : ''}`;
 }
 
 // ───────────────────────────────────────────── guidance: plain next steps from the numbers
@@ -964,44 +1042,69 @@ function guideCard(tips, note = '') {
   const ic = { bad: 'alert', warn: 'alert', good: 'check', info: 'sparkle' };
   return `<section class="card guide">
     <div class="card-h"><h2>What to do next</h2>${note ? `<span class="muted">${esc(note)}</span>` : ''}</div>
-    <ul>${tips.slice(0, 4).map((t) => `<li class="${t.tone}"><span class="g-ic">${icon(ic[t.tone] || 'sparkle', 15, 2.4)}</span><span>${t.text}</span></li>`).join('')}</ul>
+    <ul>${tips.slice(0, 4).map((t) => `<li class="${t.tone}"><span class="g-ic">${icon(ic[t.tone] || 'sparkle', 15, 2.4)}</span><span>${t.title ? `<strong class="guide-title">${esc(t.title)}</strong>` : ''}${t.text}</span></li>`).join('')}</ul>
   </section>`;
 }
 const hl = (s) => `<b>${esc(s)}</b>`;
 
-function weekGuide(w) {
-  const e = state.engine, lines = e.lines(w), sum = e.summary(w), days = e.daysOf(w), today = todayISO();
-  const isCurrent = w === e.currentWeek && days[0] <= today && today <= days.at(-1);
-  if (days[0] > today) return [];
-  const tips = [];
-  const over = lines.filter((l) => l.remaining < -0.5).sort((a, c) => a.remaining - c.remaining);
-  const logged = state.snapshot.transactions.some((t) => days.includes(t.date));
-  if (!logged) {
-    return [{ tone: 'info', text: isCurrent ? 'Nothing logged this week yet. Tap <b>+</b> each time you spend so these numbers stay accurate.' : 'Nothing was logged this week, so it is left out of your savings and averages.' }];
+function paceHeading(showForecast, showMarkers = false) {
+  return `<div class="card-h"><h2>Pace</h2><span class="legend"><i class="lg-line"></i>Spent <i class="lg-dash"></i>Even pace
+    ${showForecast ? '<i class="lg-forecast"></i>Forecast' : ''}
+    ${showMarkers ? '<i class="lg-over"></i>Went over' : ''}</span></div>`;
+}
+
+function periodStatus(remaining, elapsed, daysLeft, forecast, target) {
+  if (!elapsed) return { tone: 'neutral', label: 'Upcoming' };
+  if (remaining < -0.005) return { tone: 'bad', label: 'Over budget' };
+  if (daysLeft && forecast - target > 0.005) return { tone: 'warn', label: 'Pacing over budget' };
+  return { tone: 'good', label: daysLeft ? 'On track' : 'Within budget' };
+}
+
+function statusPill(status, extra = '') {
+  const glyph = { good: 'check', neutral: 'calendar', warn: 'alert', bad: 'alert' };
+  return `<span class="pill ${status.tone} ${extra}">${icon(glyph[status.tone], 12, 2.4)}${status.label}</span>`;
+}
+
+function paceOverMarkers(over, dailyByCategory) {
+  return over.map((line) => {
+    let spent = 0;
+    const dayIndex = dailyByCategory.get(line.category.name)?.findIndex((amount) => {
+      spent += amount;
+      return amount > 0 && spent > Math.max(0, line.available) + 0.005;
+    }) ?? -1;
+    return { dayIndex, category: line.category.name, over: -line.remaining };
+  }).filter((marker) => marker.dayIndex >= 0).slice(0, 3);
+}
+
+function weekGuide(lines, over, { elapsed, daysLeft, forecast, spent, available, remaining }) {
+  if (!elapsed) return [{ tone: 'info', text: 'This week hasn’t started yet.' }];
+  const tips = over.slice(0, 2).map((line) => {
+    const amount = -line.remaining;
+    const baseOver = line.spent - line.target;
+    const carry = line.carried < -0.005
+      ? `${baseOver > 0.005 ? ` That's ${usd(baseOver)} over before carry over.` : ''} Carry over lowered its spending limit to ${usd(Math.max(0, line.available))}.` : '';
+    return {
+      tone: amount <= 10 ? 'warn' : 'bad',
+      title: `${line.category.name} is ${usd(amount)} over`,
+      text: `${usd(line.spent)} spent against a ${usd(line.target)} weekly target.${carry}${daysLeft ? ' Hold off on further spending in this category through Sunday.' : ''}`,
+    };
+  });
+  const headroom = lines.filter((line) => line.available > 0 && line.remaining >= line.available * 0.2)
+    .sort((a, b) => b.remaining - a.remaining).slice(0, 3);
+  if (remaining >= -0.005 && daysLeft && forecast - available > 0.005) {
+    tips.push({ tone: 'warn', title: `Projected to finish ${usd(forecast - available)} over`,
+      text: `Keep total spending to about ${usd(Math.max(0, remaining) / daysLeft)} a day for the remaining ${daysLeft} day${daysLeft === 1 ? '' : 's'}.` });
+  } else if (headroom.length) {
+    const total = headroom.reduce((sum, line) => sum + line.remaining, 0);
+    tips.push({ tone: 'good', title: `${usd(total)} left in ${headroom.map((line) => line.category.name).join(', ')}`,
+      text: daysLeft ? 'These categories are within their targets for the week.' : 'These categories finished the week under their targets.' });
   }
-  if (isCurrent) {
-    const daysLeft = days.filter((d) => d >= today).length;
-    if (sum.remaining < -0.5) tips.push({ tone: 'bad', text: `You're ${hl(usd(-sum.remaining))} over for the week. Anything over comes off next week's budget, so a no-spend day or two now helps most.` });
-    for (const l of over.slice(0, 2)) tips.push({ tone: 'bad', text: `${hl(l.category.name)} is ${usd(-l.remaining)} over. Stop spending on it until ${new Date(days.at(-1) + 'T12:00:00').toLocaleDateString('en-CA', { weekday: 'long' })} night, or next week's ${esc(l.category.name)} budget starts at ${usd(Math.max(0, l.target + l.remaining))} instead of ${usd(l.target)}.` });
-    if (sum.remaining > 0.5 && daysLeft) {
-      const elapsedShare = (days.length - daysLeft + 1) / days.length;
-      const usedShare = sum.available > 0 ? sum.spent / sum.available : 1;
-      if (usedShare > elapsedShare + 0.15) tips.push({ tone: 'warn', text: `${Math.round(usedShare * 100)}% of this week's budget is gone with ${daysLeft} day${daysLeft > 1 ? 's' : ''} left. Keep to about ${hl(usd(sum.remaining / daysLeft))} a day to finish on budget.` });
-      else tips.push({ tone: 'good', text: `On track. Up to ${hl(usd(sum.remaining / daysLeft))} a day for the next ${daysLeft} day${daysLeft > 1 ? 's' : ''} keeps the week under budget.` });
-    }
-    const tight = lines.filter((l) => l.remaining >= 0 && l.available > 0 && l.remaining / l.available < 0.2 && l.spent > 0);
-    for (const l of tight.slice(0, 1)) tips.push({ tone: 'warn', text: l.remaining >= 1 ? `Only ${hl(usd(l.remaining))} left for ${esc(l.category.name)} this week.` : `${hl(l.category.name)} is used up for this week. Anything more goes over budget.` });
-  } else {
-    for (const l of over.slice(0, 2)) tips.push({ tone: 'bad', text: `${hl(l.category.name)} went ${usd(-l.remaining)} over, so week ${w + 1} started with that much less for it.` });
-    if (sum.remaining >= 0) tips.push({ tone: 'good', text: `Finished ${hl(usd(sum.remaining))} under budget. It is added to Under budget so far in Trends.` });
-  }
-  const carried = lines.reduce((s, l) => s + l.carried, 0);
-  if (carried < -0.5) tips.push({ tone: 'info', text: `${usd(-carried)} of overspending was carried in from last week, which is why some categories have less room.` });
+  if (!tips.length && !spent) return [{ tone: 'info', text: 'No spending recorded for this week.' }];
   return tips;
 }
 
-function monthGuide(m) {
-  const e = state.engine, mo = e.month(m), today = todayISO();
+function monthGuide(mo, lines, { target, elapsed, daysLeft, forecast, today }) {
+  const e = state.engine, m = mo.month;
   if (mo.first > today) return [{ tone: 'info', text: `${monthName(m)} hasn't started yet. Set monthly amounts for bills and income in Settings so this report can track them.` }];
   if (!mo.count) return [{ tone: 'info', text: `Nothing was logged in ${monthName(m)}.` }];
   const tips = [];
@@ -1016,18 +1119,18 @@ function monthGuide(m) {
   const est = state.snapshot.transactions.filter((t) => isEstimated(t) && t.date.slice(0, 7) === mo.ym);
   if (est.length) tips.push({ tone: 'bad', text: `${hl(`${est.length} ${est.length === 1 ? 'entry' : 'entries'}`)} for ${monthName(m)} ${est.length === 1 ? 'was' : 'were'} filled in for you because nothing was recorded (${[...new Set(est.map((t) => esc(t.category)))].join(', ')}). Tap the ⚠ in Bills & income to confirm or fix ${est.length === 1 ? 'it' : 'them'}.` });
   const isCurrent = today <= mo.last;
-  const elapsed = isCurrent ? Number(today.slice(8, 10)) : mo.days;
-  const left = mo.days - elapsed;
-  if (isCurrent && mo.variableTarget > 0) {
-    const projected = (mo.variableSpent / Math.max(1, elapsed)) * mo.days;
-    const room = mo.variableTarget - mo.variableSpent;
-    if (room < 0) tips.push({ tone: 'bad', text: `This month's spending budget of ${usd(mo.variableTarget)} is used up, ${hl(usd(-room))} over. Every extra dollar now adds to that.` });
-    else if (projected > mo.variableTarget * 1.05) tips.push({ tone: 'warn', text: `At this pace spending reaches about ${hl(usd(projected))} by ${shortDate(mo.last)}, ${usd(projected - mo.variableTarget)} over budget. Keep to ${hl(usd(left ? room / left : room))} a day for the rest of the month to stay on budget.` });
-    else tips.push({ tone: 'good', text: `On pace to finish around ${hl(usd(projected))}, ${usd(mo.variableTarget - projected)} under the ${usd(mo.variableTarget)} budget.` });
+  if (daysLeft > 0 && (target !== 0 || mo.variableSpent > 0)) {
+    const room = target - mo.variableSpent;
+    const remaining = `${daysLeft} day${daysLeft === 1 ? '' : 's'} left`;
+    if (room < -0.005) tips.push({ tone: 'bad', text: `This month's spending budget is already ${hl(usd(-room))} over with ${remaining}.` });
+    else if (forecast - target > 0.005) tips.push({ tone: 'warn', text: `With ${remaining}, spending is projected to reach ${hl(usd(forecast))}, or ${usd(forecast - target)} over budget. Keep to about ${hl(usd(Math.max(0, room) / daysLeft))} a day to stay on budget.` });
+    else tips.push({ tone: 'good', text: `With ${remaining}, spending is projected to finish around ${hl(usd(forecast))} on a ${usd(target)} budget.` });
   }
   // the category furthest past its share of the month so far
   const share = elapsed / mo.days;
-  const gaps = mo.lines.map((l) => ({ l, gap: l.spent - l.target * share })).filter((x) => x.l.target > 0 && x.gap > Math.max(10, x.l.target * share * 0.15)).sort((a, c) => c.gap - a.gap);
+  const gaps = lines.map((l) => ({ l, paceTarget: Math.max(0, l.available) * share }))
+    .map(({ l, paceTarget }) => ({ l, gap: l.spent - paceTarget, paceTarget }))
+    .filter((x) => x.gap > Math.max(10, x.paceTarget * 0.15)).sort((a, c) => c.gap - a.gap);
   if (gaps[0]) {
     const { l, gap } = gaps[0];
     tips.push(isCurrent
@@ -1043,8 +1146,8 @@ function monthGuide(m) {
   } else if (!isCurrent && due.length) {
     tips.push({ tone: 'info', text: `${due.map((r) => esc(r.category.name)).join(', ')} ${due.length === 1 ? 'has' : 'have'} no payment for ${monthName(m)}. If ${due.length === 1 ? 'it was' : 'they were'} paid, tap ✓ in Bills & income below.` });
   }
-  if (!isCurrent && mo.variableTarget > 0 && mo.variableSpent <= mo.variableTarget) {
-    tips.push({ tone: 'good', text: `Everyday spending finished ${hl(usd(mo.variableTarget - mo.variableSpent))} under the ${usd(mo.variableTarget)} budget.` });
+  if (!isCurrent && target > 0 && mo.variableSpent <= target) {
+    tips.push({ tone: 'good', text: `Everyday spending finished ${hl(usd(target - mo.variableSpent))} under the ${usd(target)} budget.` });
   }
   if (!isCurrent) {
     if (mo.income > 0) {
@@ -1197,10 +1300,10 @@ function keptCard(months) {
 
 /** Month: income, then bills and money set aside to invest come off first ("pay yourself first"),
  *  what remains is for everyday spending, and what's left after spending is shown last. */
-function leftCard(mo, plan, elapsed) {
+function leftCard(mo, plan, elapsed, forecast) {
   const e = state.engine, today = todayISO();
   const isCurrent = elapsed > 0 && elapsed < mo.days;
-  const projSpend = isCurrent ? Math.max(mo.variableSpent, (mo.variableSpent / elapsed) * mo.days) : mo.variableSpent;
+  const projSpend = forecast ?? mo.variableSpent;
   const hasInvest = plan.invest.plan > 0 || mo.invest > 0 || categories().some(isInvest);
   const now = { income: mo.income, bills: mo.fixed, invest: mo.invest, spend: mo.variableSpent };
   const end = isCurrent
@@ -1858,13 +1961,12 @@ document.addEventListener('click', (ev) => {
     case 'sync': refresh(); break;
     case 'prevWeek': state.week = Math.max(1, state.week - 1); render(); break;
     case 'nextWeek': state.week = Math.min(e.weeks, state.week + 1); render(); break;
-    case 'thisWeek': state.week = e.currentWeek; render(); break;
     case 'prevMonth': state.month = Math.max(1, state.month - 1); render(); break;
     case 'nextMonth': state.month = Math.min(12, state.month + 1); render(); break;
     case 'reviewEst': {
       const ym = t.dataset.ym;
-      if (Number(ym.slice(0, 4)) === e.year) { state.tab = 'insights'; state.insights = 'month'; state.month = Number(ym.slice(5, 7)); render(); window.scrollTo({ top: 0 }); }
-      else entriesSheet('Filled in for you', 'Check each one', newestFirst().filter(isEstimated));
+      const entries = newestFirst().filter((entry) => isEstimated(entry) && entry.date.slice(0, 7) === ym);
+      entriesSheet('Filled in for you', 'Check each one', entries);
       break;
     }
     case 'investExtra': {
@@ -1878,7 +1980,14 @@ document.addEventListener('click', (ev) => {
     case 'catTx': categoryEntries(t.dataset.cat, t.dataset.from, t.dataset.to); break;
     case 'tab': state.tab = t.dataset.tab; render(); window.scrollTo({ top: 0 }); break;
     case 'filter': state.filter = t.dataset.f; render(); break;
-    case 'insights': state.insights = t.dataset.m; render(); break;
+    case 'insights': state.insights = t.dataset.m; render(); window.scrollTo({ top: 0 }); break;
+    case 'carry': {
+      const key = t.dataset.period === 'month' ? 'monthCarry' : 'insightCarry';
+      state[key] = !state[key];
+      store.set(`hesab.${key}`, state[key] ? '1' : '0');
+      render();
+      break;
+    }
     case 'edit': { const tx = state.snapshot.transactions.find((x) => x.id === t.dataset.id); if (tx) entrySheet(tx); break; }
   }
 });

@@ -87,7 +87,8 @@ function detail(l) {
     <div class="l-foot">
       ${c.done ? `<button class="txt-btn" data-l="clearDone">Remove ${c.done} done</button><button class="txt-btn" data-l="uncheck">Uncheck all</button>` : ''}
       <button class="txt-btn bad" data-l="deleteList">Delete list</button>
-    </div>`;
+    </div>
+    <p class="hint center l-storage">${remote ? 'Saved in your budget sheet and shared with everyone who has access.' : 'Saved on this device.'}</p>`;
 }
 
 function section(l, s) {

@@ -4,11 +4,11 @@ import { addDays, parseISO, todayISO } from './engine.js';
 
 const f = (n) => Math.round(n * 10) / 10;
 
-export function ring(progress, size = 132, width = 13) {
+export function ring(progress, size = 132, width = 13, normalTone = 'var(--spend)') {
   const r = (size - width) / 2, c = 2 * Math.PI * r;
   const p = Math.max(0, Math.min(progress, 1));
   const over = progress > 1;
-  const tone = over ? 'var(--bad)' : progress > 0.85 ? 'var(--warn)' : 'var(--spend)';
+  const tone = over ? 'var(--bad)' : progress > 0.85 ? 'var(--warn)' : normalTone;
   const extra = over ? Math.min(progress - 1, 1) : 0;
   const r2 = r - width * 1.15, c2 = 2 * Math.PI * r2;
   return `<svg class="ring" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" aria-hidden="true">
@@ -22,28 +22,81 @@ export function ring(progress, size = 132, width = 13) {
   </svg>`;
 }
 
-/** Cumulative spending through the week vs an even pace to the budget. */
-export function paceChart(points, { w = 340, h = 150 } = {}) {
-  const pad = { l: 4, r: 4, t: 14, b: 22 };
+/** Cumulative spending and budget pace within the selected period. */
+export function paceChart(points, { w = 340, h = 128, monthly = false, forecast: suppliedForecast, markers = [] } = {}) {
+  if (markers.length) h += 36;
+  const pad = { l: 8, r: 8, t: markers.length ? 55 : 19, b: 22 };
   const iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
-  const max = Math.max(1, ...points.map((p) => Math.max(p.cumulative, p.ideal))) * 1.08;
-  const x = (i) => pad.l + (iw * i) / 6;
-  const y = (v) => pad.t + ih - (ih * v) / max;
   const past = points.filter((p) => !p.future);
+  const last = past.at(-1);
+  const forecast = suppliedForecast === undefined
+    ? (last && past.length < points.length ? last.cumulative * points.length / past.length : null)
+    : suppliedForecast;
+  const max = Math.max(1, forecast ?? 0, ...points.map((p) => Math.max(p.cumulative, p.ideal))) * 1.08;
+  const lastIndex = points.length - 1;
+  const x = (i) => pad.l + (iw * i) / Math.max(1, lastIndex);
+  const y = (v) => pad.t + ih - (ih * v) / max;
   const line = past.map((p, i) => `${i ? 'L' : 'M'}${f(x(i))},${f(y(p.cumulative))}`).join('');
   const area = past.length ? `${line}L${f(x(past.length - 1))},${f(y(0))}L${f(x(0))},${f(y(0))}Z` : '';
   const ideal = points.map((p, i) => `${i ? 'L' : 'M'}${f(x(i))},${f(y(p.ideal))}`).join('');
-  const last = past[past.length - 1];
   const overPace = last && last.cumulative > last.ideal;
-  const tone = overPace ? 'var(--bad)' : 'var(--spend)';
-  return `<svg class="chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-label="Spending pace this week">
+  const tone = !monthly && !markers.length && overPace ? 'var(--bad)' : 'var(--spend)';
+  const ticks = points.map((p, i) => {
+    if (monthly && i !== 0 && i !== lastIndex && ((i + 1) % 5 !== 0 || lastIndex - i < 3)) return '';
+    const label = monthly ? Number(p.day.slice(8)) : weekdayNarrow(p.day);
+    const anchor = i === 0 ? 'start' : i === lastIndex ? 'end' : 'middle';
+    return `<text x="${f(x(i))}" y="${h - 5}" class="tick ${p.day === todayISO() ? 'strong' : ''}" text-anchor="${anchor}">${label}</text>`;
+  }).join('');
+  const labels = [...markers].sort((a, b) => a.dayIndex - b.dayIndex).map((marker, i) => {
+    const point = past[marker.dayIndex];
+    if (!point) return '';
+    const pointX = f(x(marker.dayIndex)), pointY = f(y(point.cumulative));
+    const labelX = f(pad.l + iw * (i + 0.5) / markers.length);
+    const labelY = i % 2 ? 35 : 13;
+    const category = marker.category.length > 12 ? marker.category.slice(0, 11) + '…' : marker.category;
+    return `<g class="pace-over">
+      <title>${esc(marker.category)} is ${money(marker.over)} over its ${monthly ? 'monthly' : 'weekly'} target. It first exceeded its available limit on ${point.day}.</title>
+      <path d="M${labelX},${labelY + 7} L${pointX},${pointY}"/>
+      <circle cx="${pointX}" cy="${pointY}" r="3"/>
+      <text x="${labelX}" y="${labelY + 3}" text-anchor="middle">${esc(category)} +${compact(marker.over)}</text>
+    </g>`;
+  }).join('');
+  return `<svg class="chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="Cumulative spending and target for the selected ${monthly ? 'month' : 'week'}">
     <line x1="${pad.l}" x2="${w - pad.r}" y1="${f(y(0))}" y2="${f(y(0))}" class="axis"/>
     <path d="${ideal}" class="ideal"/>
+    ${forecast !== null ? `<path d="M${f(x(past.length - 1))},${f(y(last.cumulative))}L${f(x(lastIndex))},${f(y(forecast))}" class="forecast"/>` : ''}
     ${area ? `<path d="${area}" fill="${tone}" fill-opacity=".09"/>` : ''}
     ${line ? `<path d="${line}" fill="none" stroke="${tone}" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" class="draw"/>` : ''}
     ${last ? `<circle cx="${f(x(past.length - 1))}" cy="${f(y(last.cumulative))}" r="4.5" fill="var(--card)" stroke="${tone}" stroke-width="2.6"/>` : ''}
-    ${points.map((p, i) => `<text x="${f(x(i))}" y="${h - 5}" class="tick ${p.day === todayISO() ? 'strong' : ''}" text-anchor="${i === 0 ? 'start' : i === 6 ? 'end' : 'middle'}">${weekdayNarrow(p.day)}</text>`).join('')}
+    ${last ? `<text x="${f(x(past.length - 1))}" y="${f(y(last.cumulative) - 9)}" class="tick strong" text-anchor="${past.length <= points.length / 4 ? 'start' : past.length >= points.length * .75 ? 'end' : 'middle'}">${compact(last.cumulative)}</text>` : ''}
+    ${labels}
+    ${ticks}
   </svg>`;
+}
+
+export function weekCategories(lines) {
+  const visible = lines.filter((line) => line.spent || line.target || line.carried);
+  if (!visible.length) return '<p class="empty">No spending or targets for this week.</p>';
+  const max = Math.max(1, ...visible.map((line) => Math.max(line.spent, line.target, line.available)));
+  return `<div class="category-chart" style="--columns:${Math.min(7, visible.length)}">
+    ${visible.map((line) => {
+      const target = Math.max(0, line.available);
+      const label = line.category.name;
+      const adjusted = line.carried < -0.005;
+      const tone = line.remaining < -0.005 ? 'over' : '';
+      const details = `${money(line.spent)} spent, ${money(line.target)} weekly target${adjusted ? `, ${money(target)} adjusted target` : ''}`;
+      return `<div class="category-column" title="${esc(label)}: ${details}">
+        <div class="category-track" aria-hidden="true">
+          <i class="category-target" style="--height:${100 * Math.max(0, line.target) / max}%"></i>
+          ${adjusted ? `<i class="category-target adjusted" style="--height:${100 * target / max}%"></i>` : ''}
+          <i class="category-spent ${tone}" style="--height:${100 * Math.max(0, line.spent) / max}%"></i>
+          <b class="category-amount ${tone}" style="--height:${100 * Math.max(0, line.spent) / max}%">${compact(line.spent)}</b>
+        </div>
+        <span>${esc(label)}<small>of ${compact(line.target)}${adjusted ? `<br>Adj. ${compact(target)}` : ''}</small></span>
+        <span class="chart-sr">${details}</span>
+      </div>`;
+    }).join('')}
+  </div>`;
 }
 
 /** Weekly spending bars with the weekly budget as a dashed line. Bars carry data-week for taps. */
@@ -172,7 +225,7 @@ export function dayBars(daily, perDay, first, { w = 340, h = 150 } = {}) {
     <line x1="${pad.l}" x2="${w - pad.r}" y1="${f(y(0))}" y2="${f(y(0))}" class="axis"/>
     ${daily.map((v, i) => {
       const x = pad.l + slot * i + (slot - bw) / 2, hh = v > 0 ? Math.max(2, y(0) - y(v)) : 0;
-      const d = i + 1, tone = perDay > 0 && v > perDay * 1.5 ? 'var(--bad)' : 'var(--spend)';
+      const d = i + 1, tone = v > perDay + 0.005 ? 'var(--bad)' : 'var(--spend)';
       const label = d === 1 || d % 5 === 0 || d === todayN;
       return `${hh ? `<rect x="${f(x)}" y="${f(y(0) - hh)}" width="${f(bw)}" height="${f(hh)}" rx="${f(Math.min(3, bw / 2))}" fill="${tone}" opacity="${todayN && d > todayN ? 0.3 : d === todayN ? 1 : 0.7}"><title>${d}: ${compact(v)}</title></rect>` : ''}
         ${label ? `<text x="${f(x + bw / 2)}" y="${h - 5}" class="tick ${d === todayN ? 'strong' : ''}" text-anchor="middle">${d}</text>` : ''}`;
